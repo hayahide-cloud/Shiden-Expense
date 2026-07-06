@@ -264,8 +264,10 @@
       <label>対象月
         <input type="month" id="month-filter">
       </label>
-      <button id="export-btn">CSVエクスポート</button>
-      <p class="note">エクスポートしたCSVはUTF-8(BOM付き)。共有シートからOneDriveに保存し、ExpenseVBAの明細シートへ取り込めます。</p>
+      <button id="export-zip-btn">ZIPエクスポート（CSV＋証憑画像）</button>
+      <button id="export-btn" class="ghost">CSVのみエクスポート</button>
+      <p class="note">ZIPにはCSVと証憑画像（元ファイル名列で紐づく）が含まれます。CSVはUTF-8(BOM付き)。
+        OneDriveに保存し、ExpenseVBAの明細シートへ取り込めます。</p>
     </div>
     <div class="summary">
       <span id="count-label">0件</span>
@@ -362,10 +364,18 @@ function buildCsv(rows) {
     lines.push([
       formatDateTime(r.created_at),
       r.date, r.vendor, r.amount, r.category, r.memo,
-      SOURCE_MARKER, r.needs_review,
+      r.filename || SOURCE_MARKER, r.needs_review,
     ].map(escape).join(","));
   }
   return "\ufeff" + lines.join("\r\n") + "\r\n";
+}
+
+// \u8a3c\u6191\u753b\u50cf\u306e\u30d5\u30a1\u30a4\u30eb\u540d\u3092\u751f\u6210\u3059\u308b\u3002CSV\u306e\u5143\u30d5\u30a1\u30a4\u30eb\u540d\u5217\u3068ZIP\u5185\u306e\u753b\u50cf\u3092\u7d10\u3065\u3051\u308b\u30ad\u30fc\u306b\u306a\u308b
+function makeImageFilename(r) {
+  const sanitize = (s) => s.replace(/[\\/:*?"<>|\s]/g, "").slice(0, 20);
+  const datePart = (r.date || "\u65e5\u4ed8\u306a\u3057").replaceAll("-", "");
+  const vendorPart = sanitize(r.vendor) || "\u652f\u6255\u5148\u306a\u3057";
+  return `${datePart}_${vendorPart}_${r.amount}\u5186_${r.id.slice(-4)}.jpg`;
 }
 
 function formatDateTime(iso) {
@@ -387,6 +397,151 @@ function saveReceipts(rows) {
 function loadSettings() {
   try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) ?? {}; }
   catch { return {}; }
+}
+
+// ===== 証憑画像の保存（IndexedDB） =====
+// localStorageは容量が小さい(約5MB)ため、画像はIndexedDBに保存する。
+// キーは明細行のid。行削除・全削除と連動して画像も削除する。
+
+const DB_NAME = "expenseweb_lite";
+const IMAGE_STORE = "images";
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IMAGE_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbRequest(mode, action) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMAGE_STORE, mode);
+    const req = action(tx.objectStore(IMAGE_STORE));
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+const putImage = (id, blob) => idbRequest("readwrite", (s) => s.put(blob, id));
+const getImage = (id) => idbRequest("readonly", (s) => s.get(id));
+const deleteImage = (id) => idbRequest("readwrite", (s) => s.delete(id));
+const clearImages = () => idbRequest("readwrite", (s) => s.clear());
+
+// 画像を長辺maxDim以下のJPEGに縮小する（API送信の高速化と端末内保存容量の節約）。
+// iOS 13.1以降はimg要素経由でEXIFの回転が自動適用される
+function downscaleImage(file, maxDim = 1800, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.naturalWidth * scale);
+      canvas.height = Math.round(img.naturalHeight * scale);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(
+        (blob) => (blob ? resolve(blob) : reject(new Error("画像の変換に失敗しました"))),
+        "image/jpeg", quality
+      );
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("画像の読み込みに失敗しました")); };
+    img.src = url;
+  });
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+// ===== ZIP生成（無圧縮・自前実装） =====
+// 外部ライブラリを使わず、ZIPフォーマットの必要最小限（無圧縮エントリ）だけを実装する。
+// JPEGは既に圧縮済みのため無圧縮格納で問題ない。日本語ファイル名のためUTF-8フラグを立てる。
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+// entries: [{ name: string, data: Uint8Array }] からZIPのBlobを生成する
+function buildZip(entries) {
+  const encoder = new TextEncoder();
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  for (const { name, data } of entries) {
+    const nameBytes = encoder.encode(name);
+    const crc = crc32(data);
+
+    // ローカルファイルヘッダー（フラグ0x0800 = ファイル名UTF-8）
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true);
+    local.setUint16(6, 0x0800, true);
+    local.setUint16(8, 0, true); // 無圧縮
+    local.setUint16(10, dosTime, true);
+    local.setUint16(12, dosDate, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, data.length, true);
+    local.setUint32(22, data.length, true);
+    local.setUint16(26, nameBytes.length, true);
+    local.setUint16(28, 0, true);
+    localParts.push(new Uint8Array(local.buffer), nameBytes, data);
+
+    // セントラルディレクトリエントリ
+    const central = new DataView(new ArrayBuffer(46));
+    central.setUint32(0, 0x02014b50, true);
+    central.setUint16(4, 20, true);
+    central.setUint16(6, 20, true);
+    central.setUint16(8, 0x0800, true);
+    central.setUint16(10, 0, true);
+    central.setUint16(12, dosTime, true);
+    central.setUint16(14, dosDate, true);
+    central.setUint32(16, crc, true);
+    central.setUint32(20, data.length, true);
+    central.setUint32(24, data.length, true);
+    central.setUint16(28, nameBytes.length, true);
+    central.setUint32(42, offset, true);
+    centralParts.push(new Uint8Array(central.buffer), nameBytes);
+
+    offset += 30 + nameBytes.length + data.length;
+  }
+
+  const centralSize = centralParts.reduce((sum, p) => sum + p.length, 0);
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, entries.length, true);
+  eocd.setUint16(10, entries.length, true);
+  eocd.setUint32(12, centralSize, true);
+  eocd.setUint32(16, offset, true);
+
+  return new Blob([...localParts, ...centralParts, new Uint8Array(eocd.buffer)], {
+    type: "application/zip",
+  });
 }
 
 // OpenAI Vision APIを直接呼び出してレシートを解析する
@@ -507,9 +662,10 @@ function renderList() {
     const del = document.createElement("button");
     del.className = "danger-ghost";
     del.textContent = "削除";
-    del.addEventListener("click", () => {
+    del.addEventListener("click", async () => {
       if (!confirm("この明細を削除しますか？")) return;
       saveReceipts(loadReceipts().filter((x) => x.id !== r.id));
+      await deleteImage(r.id).catch(() => {});
       renderList();
     });
     row2.append(meta, del);
@@ -555,6 +711,9 @@ document.addEventListener("DOMContentLoaded", () => {
     showMessage("", "");
   });
 
+  // 解析中の画像を保存時までモジュール内で保持する（証憑としてIndexedDBへ保存するため）
+  let currentImage = null;
+
   // 解析
   $("analyze-btn").addEventListener("click", async () => {
     const file = $("image-input").files[0];
@@ -563,12 +722,9 @@ document.addEventListener("DOMContentLoaded", () => {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>解析中...';
     try {
-      const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+      // 縮小に失敗した場合は元画像をそのまま使う
+      currentImage = await downscaleImage(file).catch(() => file);
+      const dataUrl = await blobToDataUrl(currentImage);
       const result = await analyzeImage(dataUrl);
       openForm(result);
       showMessage("", "");
@@ -580,8 +736,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // 手入力
+  // 手入力（証憑画像なし）
   $("manual-btn").addEventListener("click", () => {
+    currentImage = null;
     openForm({ date: "", vendor: "", amount: 0, category: "", memo: "" });
   });
 
@@ -591,20 +748,37 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // 保存
-  $("save-btn").addEventListener("click", () => {
+  $("save-btn").addEventListener("click", async () => {
     const date = $("f-date").value;
     const vendor = $("f-vendor").value.trim();
     const amount = parseInt($("f-amount").value, 10) || 0;
     const category = $("f-category").value;
     const memo = $("f-memo").value.trim().slice(0, 20);
 
-    const rows = loadReceipts();
-    rows.push({
+    const row = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
       date, vendor, amount, category, memo,
       needs_review: computeNeedsReview(date, vendor, amount, category),
       created_at: new Date().toISOString(),
-    });
+      filename: "",
+    };
+
+    // 証憑画像があればIndexedDBに保存し、CSVの元ファイル名列で紐づける
+    if (currentImage) {
+      row.filename = makeImageFilename(row);
+      try {
+        await putImage(row.id, currentImage);
+      } catch (err) {
+        row.filename = "";
+        alert("証憑画像の保存に失敗しました（明細は保存されます）: " + err.message);
+      }
+      currentImage = null;
+    } else {
+      row.filename = "(手入力)";
+    }
+
+    const rows = loadReceipts();
+    rows.push(row);
     saveReceipts(rows);
     closeForm();
     showMessage("ok", "保存しました。次のレシートを撮影できます。");
@@ -616,22 +790,67 @@ document.addEventListener("DOMContentLoaded", () => {
   // 月フィルタ
   $("month-filter").addEventListener("change", renderList);
 
-  // CSVエクスポート
-  $("export-btn").addEventListener("click", () => {
+  // エクスポート対象の明細を取得する（月フィルタ適用・取込順）
+  function getExportRows() {
     const month = $("month-filter").value;
     const rows = loadReceipts()
       .filter((r) => !month || r.date.startsWith(month + "-"))
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return { month, rows };
+  }
+
+  function downloadBlob(blob, filename) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // CSVのみエクスポート
+  $("export-btn").addEventListener("click", () => {
+    const { month, rows } = getExportRows();
     if (rows.length === 0) {
       alert("エクスポートする明細がありません。");
       return;
     }
     const blob = new Blob([buildCsv(rows)], { type: "text/csv;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `receipts_${month || "all"}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    downloadBlob(blob, `receipts_${month || "all"}.csv`);
+  });
+
+  // ZIPエクスポート（CSV + 証憑画像）
+  $("export-zip-btn").addEventListener("click", async () => {
+    const { month, rows } = getExportRows();
+    if (rows.length === 0) {
+      alert("エクスポートする明細がありません。");
+      return;
+    }
+    const btn = $("export-zip-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>ZIP作成中...';
+    try {
+      const entries = [{
+        name: `receipts_${month || "all"}.csv`,
+        data: new TextEncoder().encode(buildCsv(rows)),
+      }];
+      let missing = 0;
+      for (const r of rows) {
+        if (!r.filename || r.filename === "(手入力)") continue;
+        const blob = await getImage(r.id).catch(() => null);
+        if (!blob) { missing++; continue; }
+        entries.push({
+          name: `images/${r.filename}`,
+          data: new Uint8Array(await blob.arrayBuffer()),
+        });
+      }
+      downloadBlob(buildZip(entries), `receipts_${month || "all"}.zip`);
+      if (missing > 0) {
+        alert(`注意: ${missing}件の証憑画像が見つかりませんでした（明細はCSVに含まれています）。`);
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "ZIPエクスポート（CSV＋証憑画像）";
+    }
   });
 
   // 設定保存
@@ -643,10 +862,11 @@ document.addEventListener("DOMContentLoaded", () => {
     alert("設定を保存しました。");
   });
 
-  // 全削除
-  $("clear-btn").addEventListener("click", () => {
-    if (!confirm("全明細を削除しますか？この操作は取り消せません。")) return;
+  // 全削除（証憑画像も含めて削除する）
+  $("clear-btn").addEventListener("click", async () => {
+    if (!confirm("全明細と証憑画像を削除しますか？この操作は取り消せません。")) return;
     saveReceipts([]);
+    await clearImages().catch(() => {});
     renderList();
     alert("削除しました。");
   });
