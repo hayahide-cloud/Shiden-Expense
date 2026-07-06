@@ -68,6 +68,8 @@
   input, select {
     display: block;
     width: 100%;
+    min-width: 0;
+    max-width: 100%;
     margin-top: 6px;
     padding: 12px;
     font-size: 16px;
@@ -76,8 +78,15 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     outline: none;
+    /* iOS Safariはdate/month入力をネイティブUIで描画してwidth:100%を無視し、
+       枠が親からはみ出すため、appearanceを無効化して通常のテキスト入力と同じ描画にする */
+    -webkit-appearance: none;
+    appearance: none;
   }
   input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(160, 107, 255, 0.2); }
+  /* iOSのdate/month入力は値表示が中央寄せ・高さ潰れになることがあるため明示的に整える */
+  input[type="date"], input[type="month"] { min-height: 46px; text-align: left; }
+  input::-webkit-date-and-time-value { text-align: left; }
 
   button {
     display: block;
