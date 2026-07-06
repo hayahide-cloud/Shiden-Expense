@@ -448,8 +448,21 @@ async function idbRequest(mode, action) {
   });
 }
 
-const putImage = (id, blob) => idbRequest("readwrite", (s) => s.put(blob, id));
-const getImage = (id) => idbRequest("readonly", (s) => s.get(id));
+// iOS SafariはBlobをそのままIndexedDBに保存しようとすると
+// "Error preparing Blob/File data to be stored in object store" で失敗することがある
+// （canvas.toBlob()由来のBlobで特に発生しやすい既知のWebKitの不具合）。
+// 回避策として、ArrayBuffer + MIMEタイプに変換してから保存し、読み出し時にBlobへ復元する。
+async function putImage(id, blob) {
+  const buffer = await blob.arrayBuffer();
+  return idbRequest("readwrite", (s) => s.put({ buffer, type: blob.type }, id));
+}
+
+async function getImage(id) {
+  const record = await idbRequest("readonly", (s) => s.get(id));
+  if (!record) return null;
+  return new Blob([record.buffer], { type: record.type });
+}
+
 const deleteImage = (id) => idbRequest("readwrite", (s) => s.delete(id));
 const clearImages = () => idbRequest("readwrite", (s) => s.clear());
 
