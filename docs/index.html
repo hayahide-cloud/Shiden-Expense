@@ -202,7 +202,9 @@
       <h2>レシートを撮影</h2>
       <label class="file-button">
         📷 タップして撮影 / 画像を選択
-        <input type="file" id="image-input" accept="image/*" capture="environment">
+        <!-- capture属性を付けるとカメラが強制起動してしまうため付けない。
+             iOSでは「フォトライブラリ/写真を撮る/ファイルを選択」の選択メニューが表示される -->
+        <input type="file" id="image-input" accept="image/*">
       </label>
       <img id="preview" alt="レシートプレビュー">
       <button id="analyze-btn" disabled>解析する</button>
