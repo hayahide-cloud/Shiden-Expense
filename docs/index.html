@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ExpenseWeb Lite</title>
+<meta name="description" content="レシートを撮影してOCR取込するサーバーレス経費精算ツール">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0d0716">
+<style>
+  /* ムラサキタヌキブランドの紫を基調としたダークテーマ */
+  :root {
+    --bg: #0d0716;
+    --surface: #1a1128;
+    --surface-2: #241738;
+    --border: rgba(168, 120, 255, 0.18);
+    --accent: #a06bff;
+    --accent-strong: #7c3aed;
+    --accent-soft: #c084fc;
+    --text: #ece5fa;
+    --muted: #9b8db8;
+    --warn-bg: #3a2c10;
+    --warn-text: #fbbf24;
+    --ok: #34d399;
+    --danger: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", sans-serif;
+    min-height: 100vh;
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+  header {
+    padding: calc(16px + env(safe-area-inset-top)) 20px 14px;
+    background: linear-gradient(160deg, #170b2b 0%, #0d0716 70%);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    font-size: 20px;
+    font-weight: 700;
+    background: linear-gradient(90deg, var(--accent-soft), var(--accent));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    letter-spacing: 0.02em;
+  }
+  header p { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  main { max-width: 560px; margin: 0 auto; padding: 16px; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .card h2 { font-size: 14px; color: var(--accent-soft); margin-bottom: 12px; font-weight: 600; }
+
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+  input, select {
+    display: block;
+    width: 100%;
+    margin-top: 6px;
+    padding: 12px;
+    font-size: 16px;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(160, 107, 255, 0.2); }
+
+  button {
+    display: block;
+    width: 100%;
+    padding: 14px;
+    font-size: 16px;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(90deg, var(--accent-strong), #9d5cf0);
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    margin-top: 8px;
+  }
+  button:disabled { opacity: 0.45; }
+  button.ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--accent-soft);
+    font-weight: 500;
+  }
+  button.small { width: auto; padding: 8px 12px; font-size: 13px; margin: 0; }
+  button.danger-ghost { background: transparent; border: none; color: var(--danger); width: auto; padding: 6px; font-size: 13px; margin: 0; }
+
+  .file-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 28px 14px;
+    border: 1.5px dashed var(--accent);
+    border-radius: 14px;
+    color: var(--accent-soft);
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    background: rgba(124, 58, 237, 0.08);
+  }
+  .file-button input { display: none; }
+  #preview { max-width: 100%; border-radius: 12px; margin-top: 12px; display: none; border: 1px solid var(--border); }
+
+  .banner {
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  .banner.warn { background: var(--warn-bg); color: var(--warn-text); }
+  .banner.ok { background: rgba(52, 211, 153, 0.12); color: var(--ok); }
+  .banner.error { background: rgba(248, 113, 113, 0.12); color: var(--danger); }
+
+  .receipt-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .receipt-item .row1 { display: flex; justify-content: space-between; align-items: baseline; }
+  .receipt-item .vendor { font-weight: 600; font-size: 15px; }
+  .receipt-item .amount { font-size: 17px; font-weight: 700; color: var(--accent-soft); white-space: nowrap; }
+  .receipt-item .row2 { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+  .receipt-item .meta { font-size: 12px; color: var(--muted); }
+  .receipt-item .review { font-size: 12px; color: var(--warn-text); margin-top: 4px; }
+
+  .summary { display: flex; justify-content: space-between; align-items: center; margin: 14px 2px; font-size: 13px; color: var(--muted); }
+  .summary .total { font-size: 16px; font-weight: 700; color: var(--text); }
+
+  .char-counter { float: right; font-size: 11px; }
+
+  nav {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    display: flex;
+    background: rgba(20, 12, 36, 0.96);
+    backdrop-filter: blur(12px);
+    border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  nav button {
+    flex: 1;
+    background: none;
+    border: none;
+    border-radius: 0;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 500;
+    padding: 10px 0 12px;
+    margin: 0;
+  }
+  nav button .icon { display: block; font-size: 20px; margin-bottom: 2px; }
+  nav button.active { color: var(--accent-soft); }
+
+  .spinner {
+    display: inline-block;
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,0.35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: -3px;
+    margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .hidden { display: none !important; }
+  .note { font-size: 11px; color: var(--muted); line-height: 1.6; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ExpenseWeb Lite</h1>
+  <p>レシートOCR取込 — サーバーレス版 / M.T.Works</p>
+</header>
+
+<main>
+  <!-- 取込タブ -->
+  <section id="panel-capture" class="panel active">
+    <div id="capture-message"></div>
+
+    <div id="capture-step" class="card">
+      <h2>レシートを撮影</h2>
+      <label class="file-button">
+        📷 タップして撮影 / 画像を選択
+        <input type="file" id="image-input" accept="image/*" capture="environment">
+      </label>
+      <img id="preview" alt="レシートプレビュー">
+      <button id="analyze-btn" disabled>解析する</button>
+      <button id="manual-btn" class="ghost">手入力で追加</button>
+    </div>
+
+    <div id="form-step" class="card hidden">
+      <h2>内容を確認・修正</h2>
+      <div id="review-banner" class="banner warn hidden"></div>
+      <label>日付
+        <input type="date" id="f-date">
+      </label>
+      <label>支払先
+        <input type="text" id="f-vendor" placeholder="店舗名・会社名">
+      </label>
+      <label>金額（円）
+        <input type="number" id="f-amount" inputmode="numeric" placeholder="0">
+      </label>
+      <label>勘定科目
+        <select id="f-category">
+          <option value="">未選択</option>
+        </select>
+      </label>
+      <label>摘要 <span class="char-counter"><span id="memo-count">0</span>/20</span>
+        <input type="text" id="f-memo" maxlength="20" placeholder="購入品目の要約">
+      </label>
+      <button id="save-btn">保存</button>
+      <button id="cancel-btn" class="ghost">キャンセル</button>
+    </div>
+  </section>
+
+  <!-- 一覧タブ -->
+  <section id="panel-list" class="panel">
+    <div class="card">
+      <h2>絞り込み・エクスポート</h2>
+      <label>対象月
+        <input type="month" id="month-filter">
+      </label>
+      <button id="export-btn">CSVエクスポート</button>
+      <p class="note">エクスポートしたCSVはUTF-8(BOM付き)。共有シートからOneDriveに保存し、ExpenseVBAの明細シートへ取り込めます。</p>
+    </div>
+    <div class="summary">
+      <span id="count-label">0件</span>
+      <span class="total" id="total-label">¥0</span>
+    </div>
+    <div id="receipt-list"></div>
+  </section>
+
+  <!-- 設定タブ -->
+  <section id="panel-settings" class="panel">
+    <div class="card">
+      <h2>OpenAI API設定</h2>
+      <label>APIキー
+        <input type="password" id="s-apikey" placeholder="sk-...">
+      </label>
+      <label>モデル
+        <input type="text" id="s-model" list="model-list" placeholder="gpt-5.4">
+        <datalist id="model-list">
+          <option value="gpt-5.4">
+          <option value="gpt-5.4-mini">
+          <option value="gpt-4.1-mini">
+          <option value="gpt-4.1">
+          <option value="gpt-4o-mini">
+          <option value="gpt-4o">
+        </datalist>
+      </label>
+      <button id="settings-save-btn">設定を保存</button>
+      <p class="note">
+        APIキーはこの端末のブラウザ内(localStorage)にのみ保存され、OpenAI以外には送信されません。
+        モデルIDは必ず小文字で入力してください（例: gpt-5.4）。<br>
+        明細データもこの端末内にのみ保存されます。月次でCSVエクスポートしてください。
+      </p>
+    </div>
+    <div class="card">
+      <h2>データ管理</h2>
+      <button id="clear-btn" class="ghost">全明細を削除</button>
+      <p class="note">CSVエクスポート済みのデータを整理する時に使います。この操作は取り消せません。</p>
+    </div>
+  </section>
+</main>
+
+<nav>
+  <button data-panel="capture" class="active"><span class="icon">📷</span>取込</button>
+  <button data-panel="list"><span class="icon">📋</span>一覧</button>
+  <button data-panel="settings"><span class="icon">⚙️</span>設定</button>
+</nav>
+
+<script>
+"use strict";
+
+// ===== 定数（ExpenseVBA / ExpenseWebと同一のスキーマ・文言を維持する） =====
+const CATEGORIES = ["交通費", "会議費", "消耗品費", "交際費", "通信費", "雑費"];
+const SOURCE_MARKER = "(Lite取込)";
+const CSV_HEADERS = ["取込日時", "領収書日付", "支払先", "金額", "勘定科目", "摘要", "元ファイル名", "要確認"];
+const STORAGE_KEY = "expenseweb_lite_receipts";
+const SETTINGS_KEY = "expenseweb_lite_settings";
+const DEFAULT_MODEL = "gpt-5.4";
+
+// OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
+const PROMPT = [
+  "あなたは経理担当者向けの経費精算アシスタントです。添付画像は日本の店舗レシートまたは領収書です。",
+  "画像内の文字を1文字ずつ正確に読み取ってください。手書き文字・印影・かすれた文字は、推測でそれらしい値を作らず、",
+  "確信が持てない場合は空文字にしてください。",
+  "次の項目をJSONオブジェクト1つだけで出力してください。前後に説明文やコードブロック記号は付けないでください。",
+  "date: 領収書に印字された日付（YYYY-MM-DD形式）",
+  "vendor: 発行元の店舗名・会社名（手書きの宛名「様」宛先ではなく、レシート発行元を優先する）",
+  "amount: 「合計」「ご請求金額」等と明記された税込合計金額（数値のみ、カンマ・円記号なし）。小計や内訳の金額と混同しない",
+  "category: 次のいずれか1つ（交通費、会議費、消耗品費、交際費、通信費、雑費）。摘要から最も近いものを選ぶ",
+  "memo: 購入品目・利用目的の要約（20文字以内）",
+  "読み取れない項目は date と vendor と category は空文字、amount は 0 にしてください。",
+].join("\n");
+
+// ===== コアロジック（テスト可能なようにグローバル関数にしている） =====
+
+// 要確認フラグ計算。判定順序(日付→支払先→金額→勘定科目)と文言はExpenseVBAと同一
+function computeNeedsReview(date, vendor, amount, category) {
+  const missing = [];
+  if (date === "") missing.push("日付");
+  if (vendor === "") missing.push("支払先");
+  if (Number(amount) === 0) missing.push("金額");
+  if (category === "") missing.push("勘定科目");
+  if (missing.length === 0) return "";
+  return "要確認: " + missing.join("・") + "が未検出";
+}
+
+// 8列CSV生成（UTF-8 BOM付き）。列順はExpenseVBAの明細シートと同一
+function buildCsv(rows) {
+  const escape = (v) => {
+    const s = String(v ?? "");
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [CSV_HEADERS.join(",")];
+  for (const r of rows) {
+    lines.push([
+      formatDateTime(r.created_at),
+      r.date, r.vendor, r.amount, r.category, r.memo,
+      SOURCE_MARKER, r.needs_review,
+    ].map(escape).join(","));
+  }
+  return "\ufeff" + lines.join("\r\n") + "\r\n";
+}
+
+function formatDateTime(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+         `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function loadReceipts() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) ?? []; }
+  catch { return []; }
+}
+
+function saveReceipts(rows) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(rows));
+}
+
+function loadSettings() {
+  try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) ?? {}; }
+  catch { return {}; }
+}
+
+// OpenAI Vision APIを直接呼び出してレシートを解析する
+async function analyzeImage(dataUrl) {
+  const settings = loadSettings();
+  if (!settings.apiKey) throw new Error("設定タブでAPIキーを入力してください。");
+
+  const body = {
+    model: settings.model || DEFAULT_MODEL,
+    temperature: 0,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: PROMPT },
+        { type: "image_url", image_url: { url: dataUrl, detail: "high" } },
+      ],
+    }],
+  };
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + settings.apiKey,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`APIエラー (HTTP ${res.status}): ${text.slice(0, 300)}`);
+  }
+  const payload = await res.json();
+  const content = payload.choices?.[0]?.message?.content ?? "";
+  const match = content.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("レスポンスにJSONが見つかりません: " + content.slice(0, 200));
+  const extracted = JSON.parse(match[0]);
+  return {
+    date: String(extracted.date ?? ""),
+    vendor: String(extracted.vendor ?? ""),
+    amount: parseInt(extracted.amount, 10) || 0,
+    category: CATEGORIES.includes(extracted.category) ? extracted.category : "",
+    memo: String(extracted.memo ?? "").slice(0, 20),
+  };
+}
+
+// ===== UI =====
+const $ = (id) => document.getElementById(id);
+
+function showPanel(name) {
+  document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+  document.querySelectorAll("nav button").forEach((b) => b.classList.remove("active"));
+  $(`panel-${name}`).classList.add("active");
+  document.querySelector(`nav button[data-panel="${name}"]`).classList.add("active");
+  if (name === "list") renderList();
+}
+
+function showMessage(kind, text) {
+  $("capture-message").innerHTML = "";
+  if (!text) return;
+  const div = document.createElement("div");
+  div.className = `banner ${kind}`;
+  div.textContent = text;
+  $("capture-message").appendChild(div);
+}
+
+function openForm(data) {
+  $("f-date").value = data.date;
+  $("f-vendor").value = data.vendor;
+  $("f-amount").value = data.amount;
+  $("f-category").value = data.category;
+  $("f-memo").value = data.memo;
+  $("memo-count").textContent = String(data.memo.length);
+  const review = computeNeedsReview(data.date, data.vendor, data.amount, data.category);
+  $("review-banner").textContent = review;
+  $("review-banner").classList.toggle("hidden", review === "");
+  $("capture-step").classList.add("hidden");
+  $("form-step").classList.remove("hidden");
+}
+
+function closeForm() {
+  $("form-step").classList.add("hidden");
+  $("capture-step").classList.remove("hidden");
+  $("image-input").value = "";
+  $("preview").style.display = "none";
+  $("analyze-btn").disabled = true;
+}
+
+function renderList() {
+  const month = $("month-filter").value;
+  const rows = loadReceipts().filter((r) => !month || r.date.startsWith(month + "-"));
+  rows.sort((a, b) => b.created_at.localeCompare(a.created_at));
+
+  $("count-label").textContent = `${rows.length}件`;
+  const total = rows.reduce((sum, r) => sum + Number(r.amount), 0);
+  $("total-label").textContent = "¥" + total.toLocaleString();
+
+  const list = $("receipt-list");
+  list.innerHTML = "";
+  for (const r of rows) {
+    const item = document.createElement("div");
+    item.className = "receipt-item";
+
+    const row1 = document.createElement("div");
+    row1.className = "row1";
+    const vendor = document.createElement("span");
+    vendor.className = "vendor";
+    vendor.textContent = r.vendor || "（支払先なし）";
+    const amount = document.createElement("span");
+    amount.className = "amount";
+    amount.textContent = "¥" + Number(r.amount).toLocaleString();
+    row1.append(vendor, amount);
+
+    const row2 = document.createElement("div");
+    row2.className = "row2";
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = [r.date || "日付なし", r.category || "科目なし", r.memo].filter(Boolean).join(" / ");
+    const del = document.createElement("button");
+    del.className = "danger-ghost";
+    del.textContent = "削除";
+    del.addEventListener("click", () => {
+      if (!confirm("この明細を削除しますか？")) return;
+      saveReceipts(loadReceipts().filter((x) => x.id !== r.id));
+      renderList();
+    });
+    row2.append(meta, del);
+
+    item.append(row1, row2);
+    if (r.needs_review) {
+      const review = document.createElement("div");
+      review.className = "review";
+      review.textContent = r.needs_review;
+      item.appendChild(review);
+    }
+    list.appendChild(item);
+  }
+}
+
+// ===== イベント登録 =====
+document.addEventListener("DOMContentLoaded", () => {
+  // 勘定科目セレクトを構築
+  for (const c of CATEGORIES) {
+    const opt = document.createElement("option");
+    opt.value = c;
+    opt.textContent = c;
+    $("f-category").appendChild(opt);
+  }
+
+  // 設定の復元
+  const settings = loadSettings();
+  $("s-apikey").value = settings.apiKey ?? "";
+  $("s-model").value = settings.model ?? DEFAULT_MODEL;
+
+  // ナビゲーション
+  document.querySelectorAll("nav button").forEach((b) => {
+    b.addEventListener("click", () => showPanel(b.dataset.panel));
+  });
+
+  // 画像選択
+  $("image-input").addEventListener("change", () => {
+    const file = $("image-input").files[0];
+    if (!file) return;
+    $("preview").src = URL.createObjectURL(file);
+    $("preview").style.display = "block";
+    $("analyze-btn").disabled = false;
+    showMessage("", "");
+  });
+
+  // 解析
+  $("analyze-btn").addEventListener("click", async () => {
+    const file = $("image-input").files[0];
+    if (!file) return;
+    const btn = $("analyze-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>解析中...';
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const result = await analyzeImage(dataUrl);
+      openForm(result);
+      showMessage("", "");
+    } catch (err) {
+      showMessage("error", err.message + "（手入力でも追加できます）");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "解析する";
+    }
+  });
+
+  // 手入力
+  $("manual-btn").addEventListener("click", () => {
+    openForm({ date: "", vendor: "", amount: 0, category: "", memo: "" });
+  });
+
+  // 摘要の文字数カウンタ
+  $("f-memo").addEventListener("input", () => {
+    $("memo-count").textContent = String($("f-memo").value.length);
+  });
+
+  // 保存
+  $("save-btn").addEventListener("click", () => {
+    const date = $("f-date").value;
+    const vendor = $("f-vendor").value.trim();
+    const amount = parseInt($("f-amount").value, 10) || 0;
+    const category = $("f-category").value;
+    const memo = $("f-memo").value.trim().slice(0, 20);
+
+    const rows = loadReceipts();
+    rows.push({
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+      date, vendor, amount, category, memo,
+      needs_review: computeNeedsReview(date, vendor, amount, category),
+      created_at: new Date().toISOString(),
+    });
+    saveReceipts(rows);
+    closeForm();
+    showMessage("ok", "保存しました。次のレシートを撮影できます。");
+  });
+
+  // キャンセル
+  $("cancel-btn").addEventListener("click", closeForm);
+
+  // 月フィルタ
+  $("month-filter").addEventListener("change", renderList);
+
+  // CSVエクスポート
+  $("export-btn").addEventListener("click", () => {
+    const month = $("month-filter").value;
+    const rows = loadReceipts()
+      .filter((r) => !month || r.date.startsWith(month + "-"))
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+    if (rows.length === 0) {
+      alert("エクスポートする明細がありません。");
+      return;
+    }
+    const blob = new Blob([buildCsv(rows)], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `receipts_${month || "all"}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  // 設定保存
+  $("settings-save-btn").addEventListener("click", () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      apiKey: $("s-apikey").value.trim(),
+      model: $("s-model").value.trim() || DEFAULT_MODEL,
+    }));
+    alert("設定を保存しました。");
+  });
+
+  // 全削除
+  $("clear-btn").addEventListener("click", () => {
+    if (!confirm("全明細を削除しますか？この操作は取り消せません。")) return;
+    saveReceipts([]);
+    renderList();
+    alert("削除しました。");
+  });
+});
+</script>
+</body>
+</html>
