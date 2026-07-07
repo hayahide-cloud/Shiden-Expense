@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ExpenseWeb Lite</title>
-<meta name="description" content="レシートを撮影してOCR取込するサーバーレス経費精算ツール">
+<meta name="description" content="領収書を撮影してOCR取込するサーバーレス経費精算ツール">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -274,7 +274,7 @@
 
 <header>
   <h1>ExpenseWeb Lite</h1>
-  <p>レシートOCR取込 — サーバーレス版 / M.T.Works</p>
+  <p>領収書OCR取込 — サーバーレス版 / M.T.Works</p>
 </header>
 
 <main>
@@ -283,14 +283,14 @@
     <div id="capture-message"></div>
 
     <div id="capture-step" class="card">
-      <h2>レシートを撮影</h2>
+      <h2>領収書を撮影</h2>
       <label class="file-button">
         📷 タップして撮影 / 画像を選択
         <!-- capture属性を付けるとカメラが強制起動してしまうため付けない。
              iOSでは「フォトライブラリ/写真を撮る/ファイルを選択」の選択メニューが表示される -->
         <input type="file" id="image-input" accept="image/*">
       </label>
-      <img id="preview" alt="レシートプレビュー">
+      <img id="preview" alt="領収書プレビュー">
       <button id="analyze-btn" disabled>解析する</button>
       <button id="manual-btn" class="ghost">手入力で追加</button>
     </div>
@@ -724,7 +724,7 @@ function buildZip(entries) {
   });
 }
 
-// OpenAI Vision APIを直接呼び出してレシートを解析する
+// OpenAI Vision APIを直接呼び出して領収書を解析する
 async function analyzeImage(dataUrl) {
   const settings = loadSettings();
   if (!settings.apiKey) throw new Error("設定タブでAPIキーを入力してください。");
@@ -1055,7 +1055,7 @@ document.addEventListener("DOMContentLoaded", () => {
     rows.push(row);
     saveReceipts(rows);
     closeForm();
-    showMessage("ok", "保存しました。次のレシートを撮影できます。");
+    showMessage("ok", "保存しました。次の領収書を撮影できます。");
   });
 
   // キャンセル。編集中だった場合は一覧タブへ戻す（保存時と挙動を揃える）。
