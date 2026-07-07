@@ -9,14 +9,14 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#0d0716">
+<meta name="theme-color" content="#09060f">
 <style>
-  /* ムラサキタヌキブランドの紫を基調としたダークテーマ */
+  /* ムラサキタヌキブランドの紫×漆黒のダークテーマ（紫電パレットとトーンを揃える） */
   :root {
-    --bg: #0d0716;
-    --surface: #1a1128;
-    --surface-2: #241738;
-    --border: rgba(168, 120, 255, 0.18);
+    --bg: #09060f;
+    --surface: #14101d;
+    --surface-2: #1d1729;
+    --border: rgba(168, 120, 255, 0.16);
     --accent: #a06bff;
     --accent-strong: #7c3aed;
     --accent-soft: #c084fc;
@@ -30,7 +30,10 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { -webkit-text-size-adjust: 100%; }
   body {
-    background: var(--bg);
+    /* 画面上部にほのかな紫のグローを敷く */
+    background:
+      radial-gradient(ellipse 90% 42% at 50% -6%, rgba(124, 58, 237, 0.2), transparent 70%) no-repeat,
+      var(--bg);
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", sans-serif;
     min-height: 100vh;
@@ -39,32 +42,43 @@
     overscroll-behavior-y: none;
   }
   header {
-    padding: calc(16px + env(safe-area-inset-top)) 20px 14px;
-    background: linear-gradient(160deg, #170b2b 0%, #0d0716 70%);
-    border-bottom: 1px solid var(--border);
+    padding: calc(20px + env(safe-area-inset-top)) 20px 18px;
+    text-align: center;
   }
   header h1 {
-    font-size: 20px;
-    font-weight: 700;
-    background: linear-gradient(90deg, var(--accent-soft), var(--accent));
+    font-size: 25px;
+    font-weight: 800;
+    color: #fff;
+    letter-spacing: 0.01em;
+  }
+  /* タイトル後半だけ紫グラデーションの2トーンにする */
+  header h1 .brand-grad {
+    background: linear-gradient(90deg, #a78bfa, #7c3aed);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
-    letter-spacing: 0.02em;
   }
-  header p { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  header p { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+  .header-underline {
+    width: 46px;
+    height: 2px;
+    margin: 12px auto 0;
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--accent-strong), var(--accent-soft));
+  }
   main { max-width: 560px; margin: 0 auto; padding: 16px; }
   .panel { display: none; }
   .panel.active { display: block; }
 
   .card {
-    background: var(--surface);
+    background: linear-gradient(180deg, rgba(124, 58, 237, 0.07), rgba(124, 58, 237, 0) 46%), var(--surface);
     border: 1px solid var(--border);
-    border-radius: 16px;
+    border-radius: 18px;
     padding: 16px;
     margin-bottom: 14px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
   }
-  .card h2 { font-size: 14px; color: var(--accent-soft); margin-bottom: 12px; font-weight: 600; }
+  .card h2 { font-size: 14px; color: var(--accent-soft); margin-bottom: 12px; font-weight: 600; letter-spacing: 0.03em; }
 
   label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 12px; }
   textarea {
@@ -125,12 +139,14 @@
     font-size: 16px;
     font-weight: 600;
     color: #fff;
-    background: linear-gradient(90deg, var(--accent-strong), #9d5cf0);
+    background: linear-gradient(135deg, var(--accent-strong) 0%, #a855f7 60%, #b678fb 100%);
     border: none;
     border-radius: 12px;
     cursor: pointer;
     margin-top: 8px;
+    box-shadow: 0 6px 20px rgba(124, 58, 237, 0.3);
   }
+  button.ghost, button.action-btn, button.small, button.text-link, nav button { box-shadow: none; }
   button:disabled { opacity: 0.45; }
   button.ghost {
     background: transparent;
@@ -277,7 +293,7 @@
     position: fixed;
     bottom: 0; left: 0; right: 0;
     display: flex;
-    background: rgba(20, 12, 36, 0.96);
+    background: rgba(11, 8, 17, 0.94);
     backdrop-filter: blur(12px);
     border-top: 1px solid var(--border);
     padding-bottom: env(safe-area-inset-bottom);
@@ -334,8 +350,9 @@
 <body>
 
 <header>
-  <h1>ExpenseWeb Lite</h1>
+  <h1>ExpenseWeb <span class="brand-grad">Lite</span></h1>
   <p>領収書OCR取込 — サーバーレス版 / M.T.Works</p>
+  <div class="header-underline"></div>
 </header>
 
 <main>
@@ -499,7 +516,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-08.3 画像の表示サイズ調整";
+const APP_VERSION = "2026-07-08.4 デザイン刷新";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
