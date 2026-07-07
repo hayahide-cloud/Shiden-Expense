@@ -1076,9 +1076,9 @@ function getFormReceipt() {
     memo: $("f-memo").value.trim().slice(0, 20),
     note: $("f-note").value.trim(),
     filename: editImageFilename || "(手入力)",
-    split_people: $("split-panel").classList.contains("hidden")
-      ? null
-      : (parseInt($("split-people").value, 10) || null),
+    // パネルの表示・非表示に関わらず、入力欄に値が残っていれば記録する
+    // （計算後にパネルを閉じてから申請・保存するのは自然な操作のため）
+    split_people: parseInt($("split-people").value, 10) || null,
   };
 }
 
@@ -1244,11 +1244,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const memo = $("f-memo").value.trim().slice(0, 20);
     const note = $("f-note").value.trim();
     const needsReview = computeNeedsReview(date, vendor, amount, category);
-    // 按分計算のパネルを開いて人数を入れていれば、その人数を明細に記録する
-    // （開いていない・空欄の場合は記録しない＝null）
-    const splitPeople = $("split-panel").classList.contains("hidden")
-      ? null
-      : (parseInt($("split-people").value, 10) || null);
+    // パネルの表示・非表示に関わらず、入力欄に値が残っていれば記録する
+    // （計算後にパネルを閉じてから保存するのは自然な操作のため）
+    const splitPeople = parseInt($("split-people").value, 10) || null;
 
     const rows = loadReceipts();
 
