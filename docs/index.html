@@ -442,6 +442,9 @@
       <button id="clear-btn" class="ghost">全明細を削除</button>
       <p class="note">データを整理する時に使います。この操作は取り消せません。</p>
     </div>
+    <!-- GitHub PagesのCDNキャッシュ(10分)で旧バージョンが表示されることがあるため、
+         いま表示中のバージョンを確認できるようにしている -->
+    <p class="note" id="version-label" style="text-align: center;"></p>
   </section>
 </main>
 
@@ -467,6 +470,8 @@ const ACTIVE_EDIT_KEY = "expenseweb_lite_active_edit_id";
 const DRAFT_KEY = "expenseweb_lite_draft";
 const DRAFT_IMAGE_ID = "__draft__";
 const DEFAULT_MODEL = "gpt-5.4";
+// UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
+const APP_VERSION = "2026-07-07.2 手動トリミング対応";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1062,7 +1067,8 @@ function renderCropEditor() {
   const stage = $("crop-stage");
   const canvas = $("crop-canvas");
   const cssW = stage.clientWidth;
-  if (cssW === 0) return; // 非表示中は描画しない
+  // レイアウト確定前に呼ばれた場合（hidden解除直後など）は次フレームで再試行する
+  if (cssW === 0) { requestAnimationFrame(renderCropEditor); return; }
   const cssH = cssW * cropSourceCanvas.height / cropSourceCanvas.width;
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(cssW * dpr);
@@ -1391,6 +1397,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("s-apikey").placeholder = `設定済み（末尾: ...${settings.apiKey.slice(-4)}）変更する場合のみ入力`;
   }
   $("s-model").value = settings.model ?? DEFAULT_MODEL;
+  $("version-label").textContent = `バージョン: ${APP_VERSION}`;
 
   // ナビゲーション
   document.querySelectorAll("nav button").forEach((b) => {

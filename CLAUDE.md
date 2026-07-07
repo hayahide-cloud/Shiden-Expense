@@ -19,6 +19,12 @@
   「公開閲覧+管理者のみ認証」パターンとは異なり、**全ページ・全APIをBasic認証で保護**する
   （`frontend/src/middleware.ts`が全ルートで認証チャレンジを行う）
 
+## Lite版（docs/index.html）のルール
+
+- UIに関わる変更をpushする時は、`docs/index.html`内の`APP_VERSION`定数を必ず更新する。
+  設定タブに表示され、GitHub PagesのCDNキャッシュ（約10分）で旧バージョンが
+  表示されていないかをオーナーが実機で確認するために使う
+
 ## 作業完了時の確認
 
 - `backend/app/services/vision_service.py`のプロンプトを変更したら、ExpenseVBA側の
