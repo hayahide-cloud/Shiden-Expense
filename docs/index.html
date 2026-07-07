@@ -140,7 +140,6 @@
   button.danger-ghost { background: transparent; border: none; color: var(--danger); width: auto; padding: 6px; font-size: 13px; margin: 0; }
   button.edit-ghost { background: transparent; border: none; color: var(--accent-soft); width: auto; padding: 6px 10px 6px 6px; font-size: 13px; margin: 0; }
   .receipt-item .row-buttons { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
-  .receipt-item .note-line { font-size: 12px; color: var(--muted); margin-top: 4px; }
 
   .file-button {
     display: flex;
@@ -735,21 +734,28 @@ function renderList() {
     const item = document.createElement("div");
     item.className = "receipt-item";
 
+    // 整理用メモ（備考）がある場合はそれを主見出しにし、支払先はメタ情報側へ回す。
+    // 備考は「何の会議・案件か」で一覧を見返す用途のため、支払先より優先度が高い
+    const hasNote = Boolean(r.note);
+
     const row1 = document.createElement("div");
     row1.className = "row1";
-    const vendor = document.createElement("span");
-    vendor.className = "vendor";
-    vendor.textContent = r.vendor || "（支払先なし）";
+    const title = document.createElement("span");
+    title.className = "vendor";
+    title.textContent = hasNote ? "📎 " + r.note : (r.vendor || "（支払先なし）");
     const amount = document.createElement("span");
     amount.className = "amount";
     amount.textContent = "¥" + Number(r.amount).toLocaleString();
-    row1.append(vendor, amount);
+    row1.append(title, amount);
 
     const row2 = document.createElement("div");
     row2.className = "row2";
     const meta = document.createElement("span");
     meta.className = "meta";
-    meta.textContent = [r.date || "日付なし", r.category || "科目なし", r.memo].filter(Boolean).join(" / ");
+    const metaParts = hasNote
+      ? [r.vendor || "（支払先なし）", r.date || "日付なし", r.category || "科目なし", r.memo]
+      : [r.date || "日付なし", r.category || "科目なし", r.memo];
+    meta.textContent = metaParts.filter(Boolean).join(" / ");
     const buttons = document.createElement("span");
     buttons.className = "row-buttons";
     const edit = document.createElement("button");
@@ -769,12 +775,6 @@ function renderList() {
     row2.append(meta, buttons);
 
     item.append(row1, row2);
-    if (r.note) {
-      const note = document.createElement("div");
-      note.className = "note-line";
-      note.textContent = "📎 " + r.note;
-      item.appendChild(note);
-    }
     if (r.needs_review) {
       const review = document.createElement("div");
       review.className = "review";
