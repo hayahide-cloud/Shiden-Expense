@@ -431,8 +431,9 @@
 // ===== 定数（ExpenseVBA / ExpenseWebと同一のスキーマ・文言を維持する） =====
 const CATEGORIES = ["交通費", "会議費", "消耗品費", "交際費", "通信費", "雑費"];
 const SOURCE_MARKER = "(Lite取込)";
-// 1〜8列目はExpenseVBAの明細シートと同一。9列目の備考は整理用メモ（末尾追加なので取込互換を壊さない）
-const CSV_HEADERS = ["取込日時", "領収書日付", "支払先", "金額", "勘定科目", "摘要", "元ファイル名", "要確認", "備考"];
+// 1〜8列目はExpenseVBAの明細シートと同一。9列目の備考は整理用メモ、10〜11列目は按分計算の
+// 記録（いずれも末尾追加なので取込互換を壊さない）
+const CSV_HEADERS = ["取込日時", "領収書日付", "支払先", "金額", "勘定科目", "摘要", "元ファイル名", "要確認", "備考", "按分人数", "1人あたり請求額"];
 const STORAGE_KEY = "expenseweb_lite_receipts";
 const SETTINGS_KEY = "expenseweb_lite_settings";
 const DEFAULT_MODEL = "gpt-5.4";
@@ -472,10 +473,12 @@ function buildCsv(rows) {
   };
   const lines = [CSV_HEADERS.join(",")];
   for (const r of rows) {
+    const perPerson = r.split_people ? Math.floor(Number(r.amount) / r.split_people) : "";
     lines.push([
       formatDateTime(r.created_at),
       r.date, r.vendor, r.amount, r.category, r.memo,
       r.filename || SOURCE_MARKER, r.needs_review, r.note ?? "",
+      r.split_people ?? "", perPerson,
     ].map(escape).join(","));
   }
   return "\ufeff" + lines.join("\r\n") + "\r\n";
@@ -977,6 +980,13 @@ function openForm(data, title) {
   $("capture-step").classList.add("hidden");
   $("form-step").classList.remove("hidden");
   resetSplitCalc();
+  // 記録済みの按分人数があれば、パネルを開いた状態で復元する
+  if (data.split_people) {
+    $("split-people").value = data.split_people;
+    $("split-panel").classList.remove("hidden");
+    $("split-toggle-btn").textContent = "👥 按分計算を閉じる";
+    updateSplitResult();
+  }
 }
 
 // 按分計算（例: 5人の飲み会を立て替えた後、1人あたりの請求額を出す）をリセットする。
@@ -1104,9 +1114,14 @@ function renderList() {
     row2.className = "row2";
     const meta = document.createElement("span");
     meta.className = "meta";
-    // 日付→支払先→勘定科目/摘要の3行表示
+    // 日付→支払先→勘定科目/摘要の3行表示。按分計算を記録している場合は4行目に追加する
     const metaLine3 = [r.category || "科目なし", r.memo].filter(Boolean).join(" / ");
-    meta.textContent = [r.date || "日付なし", r.vendor || "（支払先なし）", metaLine3].join("\n");
+    const metaLines = [r.date || "日付なし", r.vendor || "（支払先なし）", metaLine3];
+    if (r.split_people) {
+      const perPerson = Math.floor(Number(r.amount) / r.split_people);
+      metaLines.push(`👥 ${r.split_people}人で按分 → ¥${perPerson.toLocaleString()}/人`);
+    }
+    meta.textContent = metaLines.join("\n");
     row2.append(meta);
 
     item.append(row1, row2);
@@ -1225,6 +1240,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const memo = $("f-memo").value.trim().slice(0, 20);
     const note = $("f-note").value.trim();
     const needsReview = computeNeedsReview(date, vendor, amount, category);
+    // 按分計算のパネルを開いて人数を入れていれば、その人数を明細に記録する
+    // （開いていない・空欄の場合は記録しない＝null）
+    const splitPeople = $("split-panel").classList.contains("hidden")
+      ? null
+      : (parseInt($("split-people").value, 10) || null);
 
     const rows = loadReceipts();
 
@@ -1232,7 +1252,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // 既存明細の更新。証憑画像・取込日時・元ファイル名は変更しない
       const row = rows.find((x) => x.id === editingId);
       if (row) {
-        Object.assign(row, { date, vendor, amount, category, memo, note, needs_review: needsReview });
+        Object.assign(row, { date, vendor, amount, category, memo, note, needs_review: needsReview, split_people: splitPeople });
       }
       saveReceipts(rows);
       closeForm();
@@ -1244,6 +1264,7 @@ document.addEventListener("DOMContentLoaded", () => {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
       date, vendor, amount, category, memo, note,
       needs_review: needsReview,
+      split_people: splitPeople,
       created_at: new Date().toISOString(),
       filename: "",
     };
