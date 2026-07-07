@@ -194,7 +194,21 @@
     background: rgba(124, 58, 237, 0.08);
   }
   .file-button input { display: none; }
-  #preview { max-width: 100%; border-radius: 12px; margin-top: 12px; display: none; border: 1px solid var(--border); }
+  /* 手動トリミングエディタ: 画像の上に四隅のドラッグハンドルを重ねる */
+  #crop-editor { margin-top: 12px; }
+  #crop-stage { position: relative; }
+  #crop-canvas { width: 100%; display: block; border-radius: 12px; border: 1px solid var(--border); }
+  .crop-handle {
+    position: absolute;
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    background: rgba(124, 58, 237, 0.4);
+    border: 2px solid #fff;
+    box-shadow: 0 0 0 1px var(--accent);
+    transform: translate(-50%, -50%);
+    touch-action: none;
+    cursor: grab;
+  }
   #image-toggle-wrap { margin-bottom: 16px; }
   #split-calc { margin-bottom: 16px; }
   #split-panel { margin-top: 8px; }
@@ -314,7 +328,17 @@
              順になる（iOS側の仕様）。動画はOCR解析できないため、選択時にJS側で弾く -->
         <input type="file" id="image-input" accept="image/*,video/*">
       </label>
-      <img id="preview" alt="領収書プレビュー">
+      <div id="crop-editor" class="hidden">
+        <div id="crop-stage">
+          <canvas id="crop-canvas"></canvas>
+          <div class="crop-handle" data-corner="0"></div>
+          <div class="crop-handle" data-corner="1"></div>
+          <div class="crop-handle" data-corner="2"></div>
+          <div class="crop-handle" data-corner="3"></div>
+        </div>
+        <p class="note">🔲 四隅の丸をドラッグして領収書の角に合わせてください。
+          傾いていても解析時にまっすぐ補正されます。</p>
+      </div>
       <button id="analyze-btn" disabled>解析する</button>
       <button id="manual-btn" class="ghost">手入力で追加</button>
     </div>
@@ -654,54 +678,96 @@ async function getImage(id) {
 const deleteImage = (id) => idbRequest("readwrite", (s) => s.delete(id));
 const clearImages = () => idbRequest("readwrite", (s) => s.clear());
 
-// 画像を長辺maxDim以下のJPEGに縮小し、背景の自動トリミングと明るさ・コントラストの
-// 自動補正を行う（API送信の高速化・端末内保存容量の節約・OCR精度向上が目的）。
+// 画像を長辺maxDim以下に縮小したキャンバスへ読み込む（API送信の高速化と端末内保存容量の節約）。
 // iOS 13.1以降はimg要素経由でEXIFの回転が自動適用される
-function downscaleImage(file, maxDim = 1800, quality = 0.85) {
+function loadCanvasFromFile(file, maxDim = 1800) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
       const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
-      let canvas = document.createElement("canvas");
-      canvas.width = Math.round(img.naturalWidth * scale);
-      canvas.height = Math.round(img.naturalHeight * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
       URL.revokeObjectURL(url);
-      canvas = autoCropBackground(canvas);
-      autoEnhanceContrast(canvas);
-      canvas.toBlob(
-        (blob) => (blob ? resolve(blob) : reject(new Error("画像の変換に失敗しました"))),
-        "image/jpeg", quality
-      );
+      resolve(canvas);
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("画像の読み込みに失敗しました")); };
     img.src = url;
   });
 }
 
-// レシート・領収書の周辺に写り込んだ背景（机・床など、エッジの少ない一様な領域）を検出して
-// 自動的に切り抜く。傾き補正（perspective補正）までは行わない — 角度検出込みの完全な
-// スキャナー化は自前実装だと信頼性が低く、誤爆で金額等が写真から欠落する方が実害が大きいため、
-// 「背景の余白を控えめに削る」範囲にとどめている。境界がはっきりしない場合は元画像のまま返す
-function autoCropBackground(canvas) {
-  const { width, height } = canvas;
-  if (width < 20 || height < 20) return canvas;
-  const ctx = canvas.getContext("2d");
-  const imageData = ctx.getImageData(0, 0, width, height);
-  const bounds = detectContentBounds(imageData);
-  if (!bounds) return canvas;
-  const { left, top, right, bottom } = bounds;
-  const croppedWidth = right - left;
-  const croppedHeight = bottom - top;
-  // 削減幅が誤差レベルなら何もしない。削りすぎる場合もデータ消失リスクを避けてスキップする
-  const shrinkRatio = 1 - (croppedWidth * croppedHeight) / (width * height);
-  if (shrinkRatio < 0.02 || shrinkRatio > 0.5) return canvas;
+// 四隅(TL,TR,BR,BL・ピクセル座標)で囲んだ領域を長方形に引き伸ばして切り出す（射影変換）。
+// 傾けて撮った領収書もまっすぐな画像になる。CanvasのdrawImageはアフィン変換（平行四辺形）
+// までしか扱えないため、逆写像＋バイリニア補間をピクセル単位で自前実装している
+function warpQuadToRect(srcCanvas, quad, maxDim = 1800) {
+  const [tl, tr, br, bl] = quad;
+  const dist = (p, q) => Math.hypot(p.x - q.x, p.y - q.y);
+  // 出力サイズは対辺の長い方に合わせる（縮む方向の情報欠損を避ける）
+  let outW = Math.max(1, Math.round(Math.max(dist(tl, tr), dist(bl, br))));
+  let outH = Math.max(1, Math.round(Math.max(dist(tl, bl), dist(tr, br))));
+  const scale = Math.min(1, maxDim / Math.max(outW, outH));
+  outW = Math.max(1, Math.round(outW * scale));
+  outH = Math.max(1, Math.round(outH * scale));
+
+  const m = solveUnitSquareToQuad(tl, tr, br, bl);
+  const src = srcCanvas.getContext("2d").getImageData(0, 0, srcCanvas.width, srcCanvas.height);
   const out = document.createElement("canvas");
-  out.width = croppedWidth;
-  out.height = croppedHeight;
-  out.getContext("2d").drawImage(canvas, left, top, croppedWidth, croppedHeight, 0, 0, croppedWidth, croppedHeight);
+  out.width = outW;
+  out.height = outH;
+  const outCtx = out.getContext("2d");
+  const dst = outCtx.createImageData(outW, outH);
+  const sw = src.width, sh = src.height, sdata = src.data, ddata = dst.data;
+  let di = 0;
+  for (let y = 0; y < outH; y++) {
+    const v = (y + 0.5) / outH;
+    for (let x = 0; x < outW; x++) {
+      const u = (x + 0.5) / outW;
+      const den = m.g * u + m.h * v + 1;
+      const sx = (m.a * u + m.b * v + m.c) / den;
+      const sy = (m.d * u + m.e * v + m.f) / den;
+      const x0 = Math.max(0, Math.min(sw - 1, Math.floor(sx)));
+      const y0 = Math.max(0, Math.min(sh - 1, Math.floor(sy)));
+      const x1 = Math.min(sw - 1, x0 + 1);
+      const y1 = Math.min(sh - 1, y0 + 1);
+      const fx = Math.max(0, Math.min(1, sx - x0));
+      const fy = Math.max(0, Math.min(1, sy - y0));
+      const i00 = (y0 * sw + x0) * 4, i10 = (y0 * sw + x1) * 4;
+      const i01 = (y1 * sw + x0) * 4, i11 = (y1 * sw + x1) * 4;
+      for (let c = 0; c < 3; c++) {
+        const top = sdata[i00 + c] * (1 - fx) + sdata[i10 + c] * fx;
+        const bottom = sdata[i01 + c] * (1 - fx) + sdata[i11 + c] * fx;
+        ddata[di + c] = top * (1 - fy) + bottom * fy;
+      }
+      ddata[di + 3] = 255;
+      di += 4;
+    }
+  }
+  outCtx.putImageData(dst, 0, 0);
   return out;
+}
+
+// 単位正方形(0,0)-(1,1)を任意の四角形(TL,TR,BR,BL)へ写す射影変換の係数を求める
+// （Heckbertの標準的な導出。4点が長方形ならg=h=0となり通常のアフィン変換に一致する）
+function solveUnitSquareToQuad(tl, tr, br, bl) {
+  const dx1 = tr.x - br.x, dx2 = bl.x - br.x, dx3 = tl.x - tr.x + br.x - bl.x;
+  const dy1 = tr.y - br.y, dy2 = bl.y - br.y, dy3 = tl.y - tr.y + br.y - bl.y;
+  let g = 0, h = 0;
+  if (dx3 !== 0 || dy3 !== 0) {
+    const den = dx1 * dy2 - dx2 * dy1;
+    g = (dx3 * dy2 - dx2 * dy3) / den;
+    h = (dx1 * dy3 - dx3 * dy1) / den;
+  }
+  return {
+    a: tr.x - tl.x + g * tr.x,
+    b: bl.x - tl.x + h * bl.x,
+    c: tl.x,
+    d: tr.y - tl.y + g * tr.y,
+    e: bl.y - tl.y + h * bl.y,
+    f: tl.y,
+    g, h,
+  };
 }
 
 // 画像外周を背景（机・床など）とみなしてその輝度を推定し、背景色から一定以上離れた
@@ -970,6 +1036,88 @@ function showMessage(kind, text) {
   $("capture-message").appendChild(div);
 }
 
+// ===== 手動トリミング（四隅ドラッグ） =====
+// iOSの「書類をスキャン」風に、画像上の四隅ハンドルをドラッグして切り抜き範囲を指定する。
+// 初期位置は背景検出(detectContentBounds)の結果をヒントとして置くが、最終判断は人間が行う
+// ため、自動検出の誤りで金額等が欠落する事故は起きない
+let cropSourceCanvas = null; // 選択画像を縮小したキャンバス（解析・保存の元データ）
+let cropQuad = null; // 四隅の正規化座標(0〜1)。順序は[左上, 右上, 右下, 左下]
+
+function detectInitialQuad(canvas) {
+  const full = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
+  if (canvas.width < 20 || canvas.height < 20) return full;
+  const imageData = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+  const bounds = detectContentBounds(imageData);
+  if (!bounds) return full;
+  return [
+    { x: bounds.left / canvas.width, y: bounds.top / canvas.height },
+    { x: bounds.right / canvas.width, y: bounds.top / canvas.height },
+    { x: bounds.right / canvas.width, y: bounds.bottom / canvas.height },
+    { x: bounds.left / canvas.width, y: bounds.bottom / canvas.height },
+  ];
+}
+
+function renderCropEditor() {
+  if (!cropSourceCanvas || !cropQuad) return;
+  const stage = $("crop-stage");
+  const canvas = $("crop-canvas");
+  const cssW = stage.clientWidth;
+  if (cssW === 0) return; // 非表示中は描画しない
+  const cssH = cssW * cropSourceCanvas.height / cropSourceCanvas.width;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  canvas.style.height = `${cssH}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(cropSourceCanvas, 0, 0, canvas.width, canvas.height);
+
+  // 選択範囲の外側を暗くして、切り抜かれる領域をわかりやすくする
+  const pts = cropQuad.map((p) => ({ x: p.x * canvas.width, y: p.y * canvas.height }));
+  ctx.beginPath();
+  ctx.rect(0, 0, canvas.width, canvas.height);
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < 4; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(13, 7, 22, 0.55)";
+  ctx.fill("evenodd");
+
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < 4; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.closePath();
+  ctx.strokeStyle = "#c084fc";
+  ctx.lineWidth = 2 * dpr;
+  ctx.stroke();
+
+  document.querySelectorAll(".crop-handle").forEach((el) => {
+    const p = cropQuad[Number(el.dataset.corner)];
+    el.style.left = `${p.x * cssW}px`;
+    el.style.top = `${p.y * cssH}px`;
+  });
+}
+
+function resetCropEditor() {
+  $("crop-editor").classList.add("hidden");
+  cropSourceCanvas = null;
+  cropQuad = null;
+}
+
+// 現在の四隅で切り抜き→まっすぐ補正→コントラスト自動補正→JPEG化
+function cropAndEnhance(quality = 0.85) {
+  const quadPx = cropQuad.map((p) => ({
+    x: p.x * cropSourceCanvas.width,
+    y: p.y * cropSourceCanvas.height,
+  }));
+  const out = warpQuadToRect(cropSourceCanvas, quadPx, 1800);
+  autoEnhanceContrast(out);
+  return new Promise((resolve, reject) => {
+    out.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error("画像の変換に失敗しました"))),
+      "image/jpeg", quality
+    );
+  });
+}
+
 function openForm(data, title) {
   $("form-title").textContent = title ?? "内容を確認・修正";
   // 削除・申請ボタンは既存明細の編集時のみ表示する（新規撮影・手入力では表示しない。
@@ -1047,7 +1195,7 @@ function closeForm() {
   $("form-step").classList.add("hidden");
   $("capture-step").classList.remove("hidden");
   $("image-input").value = "";
-  $("preview").style.display = "none";
+  resetCropEditor();
   $("analyze-btn").disabled = true;
   currentImage = null;
   editingId = null;
@@ -1250,33 +1398,57 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // 画像選択（iOSの選択シートの並びをvideo/*も動画も選択できるようにしているが、
-  // OCR解析は画像のみ対応のため動画が選ばれた場合はここで弾く）
-  $("image-input").addEventListener("change", () => {
+  // OCR解析は画像のみ対応のため動画が選ばれた場合はここで弾く）。
+  // 選択した画像はトリミングエディタに表示し、四隅を背景検出の結果に合わせて初期配置する
+  $("image-input").addEventListener("change", async () => {
     const file = $("image-input").files[0];
     if (!file) return;
     if (!file.type.startsWith("image/")) {
       $("image-input").value = "";
-      $("preview").style.display = "none";
+      resetCropEditor();
       $("analyze-btn").disabled = true;
       showMessage("error", "動画は取り込めません。写真を選択してください。");
       return;
     }
-    $("preview").src = URL.createObjectURL(file);
-    $("preview").style.display = "block";
-    $("analyze-btn").disabled = false;
-    showMessage("", "");
+    $("analyze-btn").disabled = true;
+    try {
+      cropSourceCanvas = await loadCanvasFromFile(file, 1800);
+      cropQuad = detectInitialQuad(cropSourceCanvas);
+      $("crop-editor").classList.remove("hidden");
+      renderCropEditor();
+      $("analyze-btn").disabled = false;
+      showMessage("", "");
+    } catch (err) {
+      resetCropEditor();
+      showMessage("error", err.message);
+    }
   });
 
-  // 解析
+  // トリミングエディタ: 四隅ハンドルのドラッグ操作（タッチ・マウス共通のPointer Events）
+  document.querySelectorAll(".crop-handle").forEach((el) => {
+    el.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+    });
+    el.addEventListener("pointermove", (e) => {
+      if (!el.hasPointerCapture(e.pointerId) || !cropQuad) return;
+      const rect = $("crop-stage").getBoundingClientRect();
+      const q = cropQuad[Number(el.dataset.corner)];
+      q.x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+      q.y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+      renderCropEditor();
+    });
+  });
+  window.addEventListener("resize", renderCropEditor);
+
+  // 解析。トリミングエディタの四隅で切り抜き・傾き補正した画像をOCRと保存の両方に使う
   $("analyze-btn").addEventListener("click", async () => {
-    const file = $("image-input").files[0];
-    if (!file) return;
+    if (!cropSourceCanvas || !cropQuad) return;
     const btn = $("analyze-btn");
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>解析中...';
     try {
-      // 縮小に失敗した場合は元画像をそのまま使う
-      currentImage = await downscaleImage(file).catch(() => file);
+      currentImage = await cropAndEnhance();
       const dataUrl = await blobToDataUrl(currentImage);
       const result = await analyzeImage(dataUrl);
       editingId = null;
