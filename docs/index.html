@@ -35,6 +35,8 @@
     font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", sans-serif;
     min-height: 100vh;
     padding-bottom: calc(72px + env(safe-area-inset-bottom));
+    /* 引っ張って更新(Pull to Refresh)による意図しないリロードを防ぐ */
+    overscroll-behavior-y: none;
   }
   header {
     padding: calc(16px + env(safe-area-inset-top)) 20px 14px;
@@ -196,8 +198,19 @@
   .file-button input { display: none; }
   /* 手動トリミングエディタ: 画像の上に四隅のドラッグハンドルを重ねる */
   #crop-editor { margin-top: 12px; }
-  #crop-stage { position: relative; }
+  /* touch-action:noneで画像上のタッチによるスクロール・引っ張って更新を無効化。
+     user-select/touch-callout無効化で長押し時のiOSの選択メニュー(コピー等)を防ぐ */
+  #crop-stage {
+    position: relative;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    cursor: grab;
+  }
   #crop-canvas { width: 100%; display: block; border-radius: 12px; border: 1px solid var(--border); }
+  /* ハンドルは見た目のみ。当たり判定はステージ側で「最寄りの角を掴む」方式のため
+     pointer-events:noneにして、タッチはすべて#crop-stageが受ける */
   .crop-handle {
     position: absolute;
     width: 30px; height: 30px;
@@ -206,8 +219,7 @@
     border: 2px solid #fff;
     box-shadow: 0 0 0 1px var(--accent);
     transform: translate(-50%, -50%);
-    touch-action: none;
-    cursor: grab;
+    pointer-events: none;
   }
   /* ドラッグ中の拡大鏡: 指の真上に浮かんでドラッグに追従する（位置はJSで更新） */
   #crop-loupe {
@@ -480,9 +492,10 @@ const ACTIVE_PANEL_KEY = "expenseweb_lite_active_panel";
 const ACTIVE_EDIT_KEY = "expenseweb_lite_active_edit_id";
 const DRAFT_KEY = "expenseweb_lite_draft";
 const DRAFT_IMAGE_ID = "__draft__";
+const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-07.5 拡大鏡がドラッグに追従";
+const APP_VERSION = "2026-07-07.6 誤タップ対策・写真の復元";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1316,6 +1329,7 @@ function saveDraft() {
 function clearDraft() {
   localStorage.removeItem(DRAFT_KEY);
   deleteImage(DRAFT_IMAGE_ID).catch(() => {});
+  deleteImage(CROP_DRAFT_IMAGE_ID).catch(() => {});
 }
 
 // 画面更新前に編集していた既存明細があれば再度開く。ACTIVE_EDIT_KEYが指す明細が
@@ -1360,6 +1374,27 @@ async function restoreDraftIfAny() {
   }
   showMessage("ok", "画面更新前の入力内容を復元しました。");
   return true;
+}
+
+// 画面更新前に選択していた（解析前の）写真があれば、トリミングエディタごと復元する。
+// せっかく撮った写真が誤操作のリロードで消えるのを防ぐ
+async function restoreCropDraftIfAny() {
+  const blob = await getImage(CROP_DRAFT_IMAGE_ID).catch(() => null);
+  if (!blob) return false;
+  try {
+    cropSourceCanvas = await loadCanvasFromFile(blob, 3600);
+    cropPreviewCanvas = downscaleCanvas(cropSourceCanvas, 1200);
+    cropQuad = detectInitialQuad(cropPreviewCanvas);
+    $("crop-editor").classList.remove("hidden");
+    renderCropEditor();
+    $("analyze-btn").disabled = false;
+    showPanel("capture");
+    showMessage("ok", "画面更新前に選択した写真を復元しました。");
+    return true;
+  } catch {
+    deleteImage(CROP_DRAFT_IMAGE_ID).catch(() => {});
+    return false;
+  }
 }
 
 // 一覧から既存明細の編集を開始する。証憑画像があれば「表示」「画像保存」を出す
@@ -1506,6 +1541,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("analyze-btn").disabled = true;
     try {
       cropSourceCanvas = await loadCanvasFromFile(file, 3600);
+      // 選択直後の写真を下書き保存する（誤操作で画面がリロードされても撮り直しにならないように）
+      putImage(CROP_DRAFT_IMAGE_ID, file).catch(() => {});
       cropPreviewCanvas = downscaleCanvas(cropSourceCanvas, 1200);
       // 四隅の初期検出は縮小版で行う（結果は正規化座標なので元画像にそのまま使える）
       cropQuad = detectInitialQuad(cropPreviewCanvas);
@@ -1519,29 +1556,46 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // トリミングエディタ: 四隅ハンドルのドラッグ操作（タッチ・マウス共通のPointer Events）。
+  // トリミングエディタ: ドラッグ操作（タッチ・マウス共通のPointer Events）。
+  // ハンドルの円そのものではなく、ステージ上のタッチ位置から最も近い角を掴む方式に
+  // している（半径80px以内）。小さい円を正確に押さえる必要がなく、誤タップが減る。
   // ドラッグ中は指で角が隠れるため、拡大鏡で角の周辺を表示する
-  document.querySelectorAll(".crop-handle").forEach((el) => {
-    const corner = Number(el.dataset.corner);
-    el.addEventListener("pointerdown", (e) => {
+  {
+    const stageEl = $("crop-stage");
+    const GRAB_RADIUS = 80; // この距離(px)以内に角があれば掴む
+    let draggingCorner = null;
+
+    stageEl.addEventListener("pointerdown", (e) => {
+      if (!cropQuad) return;
       e.preventDefault();
-      el.setPointerCapture(e.pointerId);
-      if (cropQuad) updateCropLoupe(corner);
+      const rect = stageEl.getBoundingClientRect();
+      const x = e.clientX - rect.left, y = e.clientY - rect.top;
+      let best = -1, bestDist = Infinity;
+      cropQuad.forEach((p, i) => {
+        const d = Math.hypot(p.x * rect.width - x, p.y * rect.height - y);
+        if (d < bestDist) { bestDist = d; best = i; }
+      });
+      if (bestDist > GRAB_RADIUS) return;
+      draggingCorner = best;
+      stageEl.setPointerCapture(e.pointerId);
+      updateCropLoupe(best);
     });
-    el.addEventListener("pointermove", (e) => {
-      if (!el.hasPointerCapture(e.pointerId) || !cropQuad) return;
-      const rect = $("crop-stage").getBoundingClientRect();
-      const q = cropQuad[corner];
+    stageEl.addEventListener("pointermove", (e) => {
+      if (draggingCorner === null || !cropQuad) return;
+      const rect = stageEl.getBoundingClientRect();
+      const q = cropQuad[draggingCorner];
       q.x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
       q.y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
       renderCropEditor();
-      updateCropLoupe(corner);
+      updateCropLoupe(draggingCorner);
     });
-    const hideLoupe = () => $("crop-loupe").classList.add("hidden");
-    el.addEventListener("pointerup", hideLoupe);
-    el.addEventListener("pointercancel", hideLoupe);
-    el.addEventListener("lostpointercapture", hideLoupe);
-  });
+    const endDrag = () => {
+      draggingCorner = null;
+      $("crop-loupe").classList.add("hidden");
+    };
+    stageEl.addEventListener("pointerup", endDrag);
+    stageEl.addEventListener("pointercancel", endDrag);
+  }
   window.addEventListener("resize", renderCropEditor);
 
   // 解析。トリミングエディタの四隅で切り抜き・傾き補正した画像をOCRと保存の両方に使う
@@ -1802,14 +1856,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // 画面更新前の状態を復元する（すべてのボタンの配線が終わった後に行う）。
-  // 優先順位: 編集中だった既存明細 > 保存前の下書き > 最後に開いていたタブ
+  // 優先順位: 編集中だった既存明細 > 保存前の下書き > 解析前の選択写真 > 最後に開いていたタブ
   const restoredEdit = await restoreActiveEditIfAny();
   if (!restoredEdit) {
     const restoredDraft = await restoreDraftIfAny();
     if (!restoredDraft) {
-      const validPanels = ["capture", "list", "settings"];
-      const lastPanel = localStorage.getItem(ACTIVE_PANEL_KEY);
-      if (validPanels.includes(lastPanel)) showPanel(lastPanel);
+      const restoredCrop = await restoreCropDraftIfAny();
+      if (!restoredCrop) {
+        const validPanels = ["capture", "list", "settings"];
+        const lastPanel = localStorage.getItem(ACTIVE_PANEL_KEY);
+        if (validPanels.includes(lastPanel)) showPanel(lastPanel);
+      }
     }
   }
 });
