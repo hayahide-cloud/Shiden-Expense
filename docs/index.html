@@ -209,6 +209,17 @@
     touch-action: none;
     cursor: grab;
   }
+  /* ドラッグ中の拡大鏡: 指の下に隠れる角の周辺を拡大表示する */
+  #crop-loupe {
+    position: absolute;
+    top: 8px;
+    width: 120px; height: 120px;
+    border-radius: 50%;
+    border: 2px solid var(--accent-soft);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.55);
+    pointer-events: none;
+    background: #111;
+  }
   #image-toggle-wrap { margin-bottom: 16px; }
   #split-calc { margin-bottom: 16px; }
   #split-panel { margin-top: 8px; }
@@ -335,6 +346,7 @@
           <div class="crop-handle" data-corner="1"></div>
           <div class="crop-handle" data-corner="2"></div>
           <div class="crop-handle" data-corner="3"></div>
+          <canvas id="crop-loupe" class="hidden"></canvas>
         </div>
         <p class="note">🔲 四隅の丸をドラッグして領収書の角に合わせてください。
           傾いていても解析時にまっすぐ補正されます。</p>
@@ -471,7 +483,7 @@ const DRAFT_KEY = "expenseweb_lite_draft";
 const DRAFT_IMAGE_ID = "__draft__";
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-07.3 トリミング画質改善";
+const APP_VERSION = "2026-07-07.4 ドラッグ中の拡大鏡";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1118,9 +1130,65 @@ function renderCropEditor() {
 
 function resetCropEditor() {
   $("crop-editor").classList.add("hidden");
+  $("crop-loupe").classList.add("hidden");
   cropSourceCanvas = null;
   cropPreviewCanvas = null;
   cropQuad = null;
+}
+
+// ドラッグ中の拡大鏡。指で隠れる角の周辺を高解像度の元画像から約2.5倍で拡大表示する。
+// 指と重ならないよう画面上部に固定し、ドラッグ位置が左上に近い時だけ右上へ退避する
+function updateCropLoupe(cornerIndex) {
+  const loupe = $("crop-loupe");
+  const stage = $("crop-stage");
+  const cssW = stage.clientWidth;
+  if (!cropSourceCanvas || cssW === 0) return;
+  const cssH = cssW * cropSourceCanvas.height / cropSourceCanvas.width;
+  const dpr = window.devicePixelRatio || 1;
+  const D = 120; // 拡大鏡の直径(CSSピクセル)
+  const zoom = 2.5; // 画面表示に対する拡大率
+  loupe.width = Math.round(D * dpr);
+  loupe.height = Math.round(D * dpr);
+
+  const p = cropQuad[cornerIndex];
+  const srcW = cropSourceCanvas.width, srcH = cropSourceCanvas.height;
+  // 画面上のD/zoom(px)に相当する元画像上の窓を切り出して拡大する
+  const windowSrc = (D / zoom) * (srcW / cssW);
+  const cx = p.x * srcW, cy = p.y * srcH;
+
+  const ctx = loupe.getContext("2d");
+  ctx.clearRect(0, 0, loupe.width, loupe.height);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(loupe.width / 2, loupe.height / 2, loupe.width / 2, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, loupe.width, loupe.height);
+  // 元画像の範囲外を含むsource矩形はSafariで挙動差があるため、自前でクランプして描く
+  const scale = loupe.width / windowSrc;
+  let sx = cx - windowSrc / 2, sy = cy - windowSrc / 2;
+  let sw = windowSrc, sh = windowSrc, dx = 0, dy = 0;
+  if (sx < 0) { dx = -sx * scale; sw += sx; sx = 0; }
+  if (sy < 0) { dy = -sy * scale; sh += sy; sy = 0; }
+  if (sx + sw > srcW) sw = srcW - sx;
+  if (sy + sh > srcH) sh = srcH - sy;
+  if (sw > 0 && sh > 0) {
+    ctx.drawImage(cropSourceCanvas, sx, sy, sw, sh, dx, dy, sw * scale, sh * scale);
+  }
+  // 中心の十字線（いま角がある正確な位置）
+  ctx.strokeStyle = "#c084fc";
+  ctx.lineWidth = 1.5 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(loupe.width / 2, loupe.height * 0.25);
+  ctx.lineTo(loupe.width / 2, loupe.height * 0.75);
+  ctx.moveTo(loupe.width * 0.25, loupe.height / 2);
+  ctx.lineTo(loupe.width * 0.75, loupe.height / 2);
+  ctx.stroke();
+  ctx.restore();
+
+  const nearTopLeft = p.x * cssW < D + 50 && p.y * cssH < D + 50;
+  loupe.style.left = nearTopLeft ? `${cssW - D - 8}px` : "8px";
+  loupe.classList.remove("hidden");
 }
 
 // 現在の四隅で切り抜き→まっすぐ補正→コントラスト自動補正→JPEG化
@@ -1448,20 +1516,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // トリミングエディタ: 四隅ハンドルのドラッグ操作（タッチ・マウス共通のPointer Events）
+  // トリミングエディタ: 四隅ハンドルのドラッグ操作（タッチ・マウス共通のPointer Events）。
+  // ドラッグ中は指で角が隠れるため、拡大鏡で角の周辺を表示する
   document.querySelectorAll(".crop-handle").forEach((el) => {
+    const corner = Number(el.dataset.corner);
     el.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       el.setPointerCapture(e.pointerId);
+      if (cropQuad) updateCropLoupe(corner);
     });
     el.addEventListener("pointermove", (e) => {
       if (!el.hasPointerCapture(e.pointerId) || !cropQuad) return;
       const rect = $("crop-stage").getBoundingClientRect();
-      const q = cropQuad[Number(el.dataset.corner)];
+      const q = cropQuad[corner];
       q.x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
       q.y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
       renderCropEditor();
+      updateCropLoupe(corner);
     });
+    const hideLoupe = () => $("crop-loupe").classList.add("hidden");
+    el.addEventListener("pointerup", hideLoupe);
+    el.addEventListener("pointercancel", hideLoupe);
+    el.addEventListener("lostpointercapture", hideLoupe);
   });
   window.addEventListener("resize", renderCropEditor);
 
