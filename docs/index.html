@@ -222,6 +222,8 @@
   .receipt-item .row1 { display: flex; justify-content: space-between; align-items: baseline; }
   .receipt-item .vendor { font-weight: 600; font-size: 15px; }
   .receipt-item .amount { font-size: 22px; font-weight: 700; color: var(--accent-soft); white-space: nowrap; }
+  .receipt-item .amount-wrap { display: flex; flex-direction: column; align-items: flex-end; }
+  .receipt-item .split-amount { font-size: 13px; font-weight: 600; color: var(--ok); white-space: nowrap; margin-top: 2px; }
   .receipt-item .row2 { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
   .receipt-item .meta { font-size: 12px; color: var(--muted); white-space: pre-line; line-height: 1.5; }
   .receipt-item .review { font-size: 12px; color: var(--warn-text); margin-top: 4px; }
@@ -1107,10 +1109,20 @@ function renderList() {
     const title = document.createElement("span");
     title.className = "vendor";
     title.textContent = "📎 " + (r.note || "未設定");
+    const amountWrap = document.createElement("span");
+    amountWrap.className = "amount-wrap";
     const amount = document.createElement("span");
     amount.className = "amount";
     amount.textContent = "¥" + Number(r.amount).toLocaleString();
-    row1.append(title, amount);
+    amountWrap.append(amount);
+    if (r.split_people) {
+      const perPerson = Math.floor(Number(r.amount) / r.split_people);
+      const splitAmount = document.createElement("span");
+      splitAmount.className = "split-amount";
+      splitAmount.textContent = `¥${perPerson.toLocaleString()}/人`;
+      amountWrap.append(splitAmount);
+    }
+    row1.append(title, amountWrap);
 
     // 申請・画像保存・編集・削除はすべて編集画面に集約したため、一覧の行には
     // メタ情報のみを表示する（行タップで編集画面を開く）
