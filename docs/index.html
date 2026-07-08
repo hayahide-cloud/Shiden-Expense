@@ -534,7 +534,8 @@
         <img id="edit-preview" alt="証憑画像" class="hidden">
       </div>
       <label>依頼内容・用途
-        <input type="text" id="f-note">
+        <!-- 2行・改行可。改行を含む値もCSV側でエスケープされ、一覧表示では1行に畳まれる -->
+        <textarea id="f-note" rows="2"></textarea>
       </label>
       <label>日付
         <input type="date" id="f-date">
@@ -691,7 +692,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-08.47 初期ハンドルを常に固定の内側位置に（自動検出を廃止）";
+const APP_VERSION = "2026-07-08.48 依頼内容・用途を2行・改行可に";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -749,7 +750,9 @@ function makeImageFilename(r) {
 
 // 申請メール用の件名・本文を組み立てる
 function buildShareText(r) {
-  const subjectLabel = r.note || r.vendor || "経費申請";
+  // 依頼内容・用途は改行を含めるため、件名には1行目だけを使う（件名に改行は入れられない）
+  const noteFirstLine = (r.note || "").split(/\r?\n/)[0].trim();
+  const subjectLabel = noteFirstLine || r.vendor || "経費申請";
   const subject = `経費申請: ${subjectLabel}${r.date ? "（" + r.date + "）" : ""}`;
   const body = [
     `日付: ${r.date || "（未入力）"}`,
