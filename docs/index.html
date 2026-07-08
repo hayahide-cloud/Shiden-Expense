@@ -238,6 +238,9 @@
     background: rgba(124, 58, 237, 0.08);
   }
   .file-button input { display: none; }
+  /* 交通費のスクショ取込は補助的な入口のため、メインの撮影ボタンより低めにする */
+  #transit-label { padding: 14px; margin-top: 10px; font-size: 14.5px; }
+  .file-button.busy { pointer-events: none; opacity: 0.6; }
   /* 手動トリミングエディタ（全画面の画像編集フェーズ）:
      写真選択中はbodyにcrop-fullscreenクラスを付け、ヘッダー・main・ナビを隠して
      このエディタだけを表示する。position:fixedは使わず、アプリシェル（bodyのflex列）の
@@ -525,6 +528,12 @@
              順になる（iOS側の仕様）。動画はOCR解析できないため、選択時にJS側で弾く -->
         <input type="file" id="image-input" accept="image/*,video/*">
       </label>
+      <!-- 交通費: Googleマップ等の経路検索のスクショから運賃を読み取る。
+           スクショは紙と違い傾き・影が無いため、トリミング編集をスキップして直接OCRする -->
+      <label class="file-button" id="transit-label">
+        <span id="transit-label-text">🚃 交通費: 経路のスクショを取込</span>
+        <input type="file" id="transit-input" accept="image/*">
+      </label>
       <button id="manual-btn" class="ghost">手入力で追加</button>
     </div>
 
@@ -694,7 +703,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-08.51 下部バーを画面下端へ・アイコンと文字は元に";
+const APP_VERSION = "2026-07-08.52 交通費: 経路スクショから運賃を取込";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -708,6 +717,19 @@ const PROMPT = [
   "category: 次のいずれか1つ（交通費、会議費、消耗品費、交際費、通信費、雑費）。摘要から最も近いものを選ぶ",
   "memo: 購入品目・利用目的の要約（20文字以内）",
   "読み取れない項目は date と vendor と category は空文字、amount は 0 にしてください。",
+].join("\n");
+
+// 交通費用OCRプロンプト: Googleマップ等の経路検索アプリのスクリーンショットから運賃を読み取る
+const TRANSIT_PROMPT = [
+  "あなたは経理担当者向けの経費精算アシスタントです。添付画像はGoogleマップ等の経路検索アプリのスクリーンショットです。",
+  "表示されている経路について、次の項目をJSONオブジェクト1つだけで出力してください。前後に説明文やコードブロック記号は付けないでください。",
+  "複数の経路が写っている場合は、選択中（詳細表示・強調表示）の経路を対象にしてください。",
+  "date: 画像内に日付が明記されている場合のみYYYY-MM-DD形式。「今日」等の相対表現しか無い場合や読み取れない場合は空文字",
+  "from: 出発地の駅名・地名",
+  "to: 到着地の駅名・地名",
+  "amount: 運賃の合計（数値のみ、カンマ・円記号なし）。IC運賃と切符運賃の両方がある場合はIC運賃を優先する",
+  "line: 主に利用する路線名・交通機関名（例: JR山手線、東京メトロ丸ノ内線。複数ある場合は代表的な1つ）",
+  "推測でそれらしい値を作らず、読み取れない項目は from・to・line は空文字、amount は 0 にしてください。",
 ].join("\n");
 
 // ===== コアロジック（テスト可能なようにグローバル関数にしている） =====
@@ -1192,7 +1214,8 @@ function buildZip(entries) {
 }
 
 // OpenAI Vision APIを直接呼び出して領収書を解析する
-async function analyzeImage(dataUrl) {
+// OpenAI Vision APIを呼び出し、レスポンス中のJSONオブジェクトをパースして返す（プロンプト共通部）
+async function callVisionApi(dataUrl, promptText) {
   const settings = loadSettings();
   if (!settings.apiKey) throw new Error("設定タブでAPIキーを入力してください。");
 
@@ -1202,7 +1225,7 @@ async function analyzeImage(dataUrl) {
     messages: [{
       role: "user",
       content: [
-        { type: "text", text: PROMPT },
+        { type: "text", text: promptText },
         { type: "image_url", image_url: { url: dataUrl, detail: "high" } },
       ],
     }],
@@ -1224,7 +1247,11 @@ async function analyzeImage(dataUrl) {
   const content = payload.choices?.[0]?.message?.content ?? "";
   const match = content.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("レスポンスにJSONが見つかりません: " + content.slice(0, 200));
-  const extracted = JSON.parse(match[0]);
+  return JSON.parse(match[0]);
+}
+
+async function analyzeImage(dataUrl) {
+  const extracted = await callVisionApi(dataUrl, PROMPT);
   return {
     date: String(extracted.date ?? ""),
     vendor: String(extracted.vendor ?? ""),
@@ -1232,6 +1259,29 @@ async function analyzeImage(dataUrl) {
     category: CATEGORIES.includes(extracted.category) ? extracted.category : "",
     memo: String(extracted.memo ?? "").slice(0, 20),
   };
+}
+
+// 交通費（経路検索スクショ）の解析結果を明細フォームの形式に変換する。
+// 勘定科目は交通費で固定、摘要は「出発地→到着地」、支払先は路線・交通機関名
+async function analyzeTransitImage(dataUrl) {
+  const extracted = await callVisionApi(dataUrl, TRANSIT_PROMPT);
+  const from = String(extracted.from ?? "").trim();
+  const to = String(extracted.to ?? "").trim();
+  // 経路スクショには日付が写らないことが多い。空なら当日移動の精算を想定して今日を既定にする
+  return {
+    date: String(extracted.date ?? "") || todayString(),
+    vendor: String(extracted.line ?? "").trim(),
+    amount: parseInt(extracted.amount, 10) || 0,
+    category: "交通費",
+    memo: (from && to ? `${from}→${to}` : "").slice(0, 20),
+  };
+}
+
+// 今日の日付をローカルタイムでYYYY-MM-DD形式にする
+function todayString() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function downloadBlob(blob, filename) {
@@ -1470,8 +1520,12 @@ function cropAndEnhance(quality = 0.85) {
   const out = warpQuadToRect(cropSourceCanvas, quadPx, 1800);
   if ($("opt-shadow").checked) removeShadow(out);
   if ($("opt-contrast").checked) autoEnhanceContrast(out);
+  return canvasToJpegBlob(out, quality);
+}
+
+function canvasToJpegBlob(canvas, quality = 0.85) {
   return new Promise((resolve, reject) => {
-    out.toBlob(
+    canvas.toBlob(
       (blob) => (blob ? resolve(blob) : reject(new Error("画像の変換に失敗しました"))),
       "image/jpeg", quality
     );
@@ -1900,6 +1954,43 @@ document.addEventListener("DOMContentLoaded", async () => {
     } catch (err) {
       resetCropEditor();
       showMessage("error", err.message);
+    }
+  });
+
+  // 交通費: 経路検索スクショの取込。スクショは傾き・影が無いためトリミング編集を
+  // スキップし、縮小してそのままOCR→確認・修正フォームへ進む（画像は証憑として保存）
+  $("transit-input").addEventListener("change", async () => {
+    const file = $("transit-input").files[0];
+    $("transit-input").value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      showMessage("error", "画像（スクリーンショット）を選択してください。");
+      return;
+    }
+    const label = $("transit-label");
+    const textEl = $("transit-label-text");
+    label.classList.add("busy");
+    textEl.innerHTML = '<span class="spinner"></span>運賃を解析中...';
+    try {
+      const canvas = await loadCanvasFromFile(file, 1800);
+      currentImage = await canvasToJpegBlob(canvas);
+      const dataUrl = await blobToDataUrl(currentImage);
+      const result = await analyzeTransitImage(dataUrl);
+      editingId = null;
+      openForm(result);
+      resetImageToggle();
+      editImageBlob = currentImage;
+      $("image-toggle-wrap").classList.remove("hidden");
+      showEditPreview();
+      showMessage("", "");
+      // OCR結果を下書きとして保持する（画面更新でAPI呼び出し分の結果が失われないように）
+      saveDraft();
+      await putImage(DRAFT_IMAGE_ID, currentImage).catch(() => {});
+    } catch (err) {
+      showMessage("error", err.message + "（手入力でも追加できます）");
+    } finally {
+      label.classList.remove("busy");
+      textEl.textContent = "🚃 交通費: 経路のスクショを取込";
     }
   });
 
