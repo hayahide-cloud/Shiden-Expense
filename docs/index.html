@@ -403,7 +403,7 @@
 <body>
 
 <header>
-  <h1>Shiden <span class="brand-grad">Expense</span></h1>
+  <h1><span class="brand-grad">Shiden</span> Expense</h1>
   <p>領収書OCR取込 — サーバーレス版 / M.T.Works</p>
   <div class="header-underline"></div>
 </header>
@@ -568,18 +568,16 @@ const SOURCE_MARKER = "(Shiden取込)";
 // 1〜8列目はExpenseVBAの明細シートと同一。9列目の備考は整理用メモ、10〜11列目は按分計算の
 // 記録（いずれも末尾追加なので取込互換を壊さない）
 const CSV_HEADERS = ["取込日時", "領収書日付", "支払先", "金額", "勘定科目", "摘要", "元ファイル名", "要確認", "備考", "按分人数", "1人あたり請求額"];
-// 保存キーの"expenseweb_lite"は旧名だが、変更すると保存済みの明細・設定が見えなくなるため
-// データ継続を優先して意図的にそのまま使い続ける（IndexedDBのDB名も同様）
-const STORAGE_KEY = "expenseweb_lite_receipts";
-const SETTINGS_KEY = "expenseweb_lite_settings";
-const ACTIVE_PANEL_KEY = "expenseweb_lite_active_panel";
-const ACTIVE_EDIT_KEY = "expenseweb_lite_active_edit_id";
-const DRAFT_KEY = "expenseweb_lite_draft";
+const STORAGE_KEY = "shiden_expense_receipts";
+const SETTINGS_KEY = "shiden_expense_settings";
+const ACTIVE_PANEL_KEY = "shiden_expense_active_panel";
+const ACTIVE_EDIT_KEY = "shiden_expense_active_edit_id";
+const DRAFT_KEY = "shiden_expense_draft";
 const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-08.11 Shiden Expenseに改名";
+const APP_VERSION = "2026-07-08.12 ロゴ配色変更・保存キー刷新";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -751,8 +749,7 @@ function loadSettings() {
 // localStorageは容量が小さい(約5MB)ため、画像はIndexedDBに保存する。
 // キーは明細行のid。行削除・全削除と連動して画像も削除する。
 
-// DB名は旧名だが、変更すると保存済みの証憑画像が見えなくなるため意図的にそのまま使う
-const DB_NAME = "expenseweb_lite";
+const DB_NAME = "shiden_expense";
 const IMAGE_STORE = "images";
 
 function openDb() {
