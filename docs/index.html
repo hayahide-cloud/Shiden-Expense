@@ -691,7 +691,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-08.44 影消去・コントラスト補正の即時プレビュー";
+const APP_VERSION = "2026-07-08.45 確認画面で証憑画像を既定表示";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1631,6 +1631,16 @@ function resetImageToggle() {
   $("save-image-btn").classList.add("hidden");
 }
 
+// 証憑画像プレビューを表示状態にする。「内容を確認・修正」では撮影した画像と
+// OCR結果の見比べが主目的のため、既定で表示にして開く（トグルで非表示にはできる）
+function showEditPreview() {
+  if (!editImageBlob) return;
+  if (!editPreviewUrl) editPreviewUrl = URL.createObjectURL(editImageBlob);
+  $("edit-preview").src = editPreviewUrl;
+  $("edit-preview").classList.remove("hidden");
+  $("toggle-image-btn").textContent = "📷 証憑画像を非表示";
+}
+
 function closeForm() {
   $("form-step").classList.add("hidden");
   $("capture-step").classList.remove("hidden");
@@ -1704,6 +1714,7 @@ async function restoreDraftIfAny() {
       resetImageToggle();
       editImageBlob = currentImage;
       $("image-toggle-wrap").classList.remove("hidden");
+      showEditPreview(); // 「内容を確認・修正」の復元でも既定は表示
     }
   }
   showMessage("ok", "画面更新前の入力内容を復元しました。");
@@ -2006,11 +2017,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       resetCropEditor();
       $("image-input").value = "";
       openForm(result);
-      // 保存前でも証憑画像の表示/非表示トグルを使えるようにする（画像保存ボタンは
-      // 保存後の明細にのみ出す仕様のためここでは表示しない）
+      // 証憑画像は既定で表示にして開く（画像とOCR結果を見比べて確認する画面のため。
+      // 画像保存ボタンは保存後の明細にのみ出す仕様のためここでは表示しない）
       resetImageToggle();
       editImageBlob = currentImage;
       $("image-toggle-wrap").classList.remove("hidden");
+      showEditPreview();
       showMessage("", "");
       // OCR結果を下書きとして保持する（画面更新でAPI呼び出し分の結果が失われないように）
       saveDraft();
@@ -2162,12 +2174,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       $("toggle-image-btn").textContent = "📷 証憑画像を表示";
       return;
     }
-    if (!editPreviewUrl && editImageBlob) {
-      editPreviewUrl = URL.createObjectURL(editImageBlob);
-    }
-    img.src = editPreviewUrl;
-    img.classList.remove("hidden");
-    $("toggle-image-btn").textContent = "📷 証憑画像を非表示";
+    showEditPreview();
   });
 
   // 証憑画像をタップすると拡大ビューアを開く
