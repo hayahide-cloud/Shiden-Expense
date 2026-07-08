@@ -593,7 +593,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-08.37 ホーム画面名を紫電Expenseに";
+const APP_VERSION = "2026-07-08.38 影消去を追加";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -965,6 +965,77 @@ function findEdge(coverage, threshold, dir) {
   return null;
 }
 
+// 影消去（照明ムラの除去）。撮影時に紙へ落ちた影で紙面の明るさが不均一になるのを補正する。
+// 「ブロックごとの最大輝度 ≒ そこでの紙の明るさ」とみなして粗い照明マップを作り、
+// 平滑化してから各画素を照明マップで割る（白基準の正規化）。影の部分だけ明るく持ち上がり、
+// 文字は周囲との相対差が保たれるため黒いまま残る。スキャナーアプリの「影消去」と同じ原理
+function removeShadow(canvas) {
+  const ctx = canvas.getContext("2d");
+  const { width, height } = canvas;
+  if (width < 40 || height < 40) return;
+  const img = ctx.getImageData(0, 0, width, height);
+  const data = img.data;
+
+  // 1. ブロックごとの最大輝度で粗い照明マップを作る（文字の黒に引きずられないようmaxを使う）
+  const block = Math.max(8, Math.round(Math.max(width, height) / 40));
+  const gw = Math.ceil(width / block);
+  const gh = Math.ceil(height / block);
+  const grid = new Float32Array(gw * gh);
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      let m = 0;
+      const x0 = gx * block, y0 = gy * block;
+      const x1 = Math.min(width, x0 + block), y1 = Math.min(height, y0 + block);
+      for (let y = y0; y < y1; y++) {
+        let i = (y * width + x0) * 4;
+        for (let x = x0; x < x1; x++, i += 4) {
+          const lum = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+          if (lum > m) m = lum;
+        }
+      }
+      grid[gy * gw + gx] = m;
+    }
+  }
+
+  // 2. 3x3ボックスブラーを2回かけて照明マップを滑らかにする（影の境界の段差を防ぐ）
+  for (let pass = 0; pass < 2; pass++) {
+    const src = grid.slice();
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        let sum = 0, n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const yy = gy + dy, xx = gx + dx;
+            if (yy >= 0 && yy < gh && xx >= 0 && xx < gw) { sum += src[yy * gw + xx]; n++; }
+          }
+        }
+        grid[gy * gw + gx] = sum / n;
+      }
+    }
+  }
+
+  // 3. バイリニア補間で全画素分の照明マップを求め、白(245)を基準に正規化する
+  const target = 245;
+  for (let y = 0; y < height; y++) {
+    const fy = Math.min(gh - 1, y / block);
+    const y0 = Math.floor(fy), y1 = Math.min(gh - 1, y0 + 1), wy = fy - y0;
+    for (let x = 0; x < width; x++) {
+      const fx = Math.min(gw - 1, x / block);
+      const x0 = Math.floor(fx), x1 = Math.min(gw - 1, x0 + 1), wx = fx - x0;
+      const light =
+        (grid[y0 * gw + x0] * (1 - wx) + grid[y0 * gw + x1] * wx) * (1 - wy) +
+        (grid[y1 * gw + x0] * (1 - wx) + grid[y1 * gw + x1] * wx) * wy;
+      // 極端に暗い領域（黒背景など）を増幅しすぎないよう下限を設ける
+      const gain = target / Math.max(80, light);
+      const i = (y * width + x) * 4;
+      data[i] = clampByte(data[i] * gain);
+      data[i + 1] = clampByte(data[i + 1] * gain);
+      data[i + 2] = clampByte(data[i + 2] * gain);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
 // 明るさ・コントラストの自動補正（オートレベル）。輝度ヒストグラムの上下0.5%を外れ値として
 // 切り捨て、残りの範囲を0-255に引き伸ばす。薄い印字・かすれた文字の視認性とOCR精度を上げる
 function autoEnhanceContrast(canvas) {
@@ -1312,13 +1383,14 @@ function updateCropLoupe(cornerIndex) {
   loupe.classList.remove("hidden");
 }
 
-// 現在の四隅で切り抜き→まっすぐ補正→コントラスト自動補正→JPEG化
+// 現在の四隅で切り抜き→まっすぐ補正→影消去→コントラスト自動補正→JPEG化
 function cropAndEnhance(quality = 0.85) {
   const quadPx = cropQuad.map((p) => ({
     x: p.x * cropSourceCanvas.width,
     y: p.y * cropSourceCanvas.height,
   }));
   const out = warpQuadToRect(cropSourceCanvas, quadPx, 1800);
+  removeShadow(out);
   autoEnhanceContrast(out);
   return new Promise((resolve, reject) => {
     out.toBlob(
