@@ -691,7 +691,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-08.43 全画面編集の上部余白と補正チェックのタップ修正";
+const APP_VERSION = "2026-07-08.44 影消去・コントラスト補正の即時プレビュー";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1341,6 +1341,7 @@ function showMessage(kind, text) {
 // 粗くなるため。3600pxはiOS Safariのキャンバス面積上限(約1670万px)に収まる安全値
 let cropSourceCanvas = null; // 高解像度の切り抜き元（保存・OCR用）
 let cropPreviewCanvas = null; // エディタ表示用の縮小版（ドラッグ中の再描画を軽くする）
+let cropFilteredPreview = null; // 縮小版に補正（影消去・コントラスト）を適用したプレビュー
 let cropQuad = null; // 四隅の正規化座標(0〜1)。順序は[左上, 右上, 右下, 左下]
 
 // キャンバスを長辺maxDim以下に縮小した新しいキャンバスを返す（元より小さければそのまま複製）
@@ -1373,6 +1374,27 @@ function detectInitialQuad(canvas) {
   ];
 }
 
+// 補正チェック（影消去・コントラスト）の現在の状態を縮小版プレビューに適用する。
+// チェックを切り替えた時点で結果を確認できるようにするためのもので、ドラッグ中の
+// 再描画で毎回計算しないよう、結果はキャンバスとして保持しておく。
+// ※実際の保存・OCR用画像は切り抜き後の高解像度画像に対して適用するため、
+//   ここは「見え方の事前確認」用の近似（切り抜き前の全体に適用）
+function updateCropFilterPreview() {
+  if (!cropPreviewCanvas) return;
+  if ($("opt-shadow").checked || $("opt-contrast").checked) {
+    const c = document.createElement("canvas");
+    c.width = cropPreviewCanvas.width;
+    c.height = cropPreviewCanvas.height;
+    c.getContext("2d").drawImage(cropPreviewCanvas, 0, 0);
+    if ($("opt-shadow").checked) removeShadow(c);
+    if ($("opt-contrast").checked) autoEnhanceContrast(c);
+    cropFilteredPreview = c;
+  } else {
+    cropFilteredPreview = null; // 両方OFFなら元画像をそのまま表示
+  }
+  renderCropEditor();
+}
+
 function renderCropEditor() {
   if (!cropPreviewCanvas || !cropQuad) return;
   const canvas = $("crop-canvas");
@@ -1392,7 +1414,8 @@ function renderCropEditor() {
   canvas.style.width = `${cssW}px`;
   canvas.style.height = `${cssH}px`;
   const ctx = canvas.getContext("2d");
-  ctx.drawImage(cropPreviewCanvas, 0, 0, canvas.width, canvas.height);
+  // 補正チェックがONなら補正適用済みプレビューを表示する（サイズは縮小版と同一）
+  ctx.drawImage(cropFilteredPreview || cropPreviewCanvas, 0, 0, canvas.width, canvas.height);
 
   // 選択範囲の外側を暗くして、切り抜かれる領域をわかりやすくする
   const pts = cropQuad.map((p) => ({ x: p.x * canvas.width, y: p.y * canvas.height }));
@@ -1424,7 +1447,7 @@ function openCropEditor() {
   $("crop-editor").classList.remove("hidden");
   document.body.classList.add("crop-fullscreen");
   $("crop-message").classList.add("hidden");
-  renderCropEditor();
+  updateCropFilterPreview(); // 補正プレビューを反映した上で描画される
 }
 
 // 全画面の編集フェーズを閉じ、通常表示（ヘッダー・ナビ）に戻す
@@ -1435,6 +1458,7 @@ function resetCropEditor() {
   $("crop-message").classList.add("hidden");
   cropSourceCanvas = null;
   cropPreviewCanvas = null;
+  cropFilteredPreview = null;
   cropQuad = null;
 }
 
@@ -1882,7 +1906,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("s-model").value = settings.model ?? DEFAULT_MODEL;
   // 保存済みのモデルが選択肢に無い場合（旧バージョンの自由入力値など）は既定値に戻す
   if ($("s-model").value === "") $("s-model").value = DEFAULT_MODEL;
-  // 影消去・コントラスト補正のON/OFFを復元（既定はON）。変更のたびに設定へ保存する
+  // 影消去・コントラスト補正のON/OFFを復元（既定はON）。変更のたびに設定へ保存し、
+  // 編集中の画像プレビューにも即時反映する（チェックした時点で結果を確認できる）
   $("opt-shadow").checked = settings.removeShadow !== false;
   $("opt-contrast").checked = settings.autoContrast !== false;
   const saveFilterOptions = () => {
@@ -1891,6 +1916,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       removeShadow: $("opt-shadow").checked,
       autoContrast: $("opt-contrast").checked,
     }));
+    updateCropFilterPreview();
   };
   $("opt-shadow").addEventListener("change", saveFilterOptions);
   $("opt-contrast").addEventListener("change", saveFilterOptions);
