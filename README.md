@@ -5,9 +5,9 @@
 スマホで領収書を撮影 → OpenAI Vision APIでOCR取込 → 明細として記録する。
 ExpenseVBAを置き換えるものではなく**併用**する。月次集計・仕訳出力は引き続きExcel側（ExpenseVBA）で行う。
 
-本リポジトリには2つの実装がある。**現在の運用はLite版**。
+本リポジトリには2つの実装がある。**現在の運用はサーバーレス版（Shiden Expense）**。
 
-| | Shiden Expense（`docs/`・旧ExpenseWeb Lite） | フル構成（`frontend/` + `backend/`） |
+| | Shiden Expense（`docs/`） | フル構成（`frontend/` + `backend/`） |
 |---|---|---|
 | 状態 | **運用中** | 実装済み・デプロイ保留（将来のセルフホスト移行先） |
 | ホスティング | GitHub Pages（無料） | Railway or 自宅サーバー |

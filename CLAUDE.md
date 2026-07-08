@@ -19,7 +19,7 @@
   「公開閲覧+管理者のみ認証」パターンとは異なり、**全ページ・全APIをBasic認証で保護**する
   （`frontend/src/middleware.ts`が全ルートで認証チャレンジを行う）
 
-## Lite版（docs/index.html）のルール
+## Shiden Expense（docs/index.html）のルール
 
 - UIに関わる変更をpushする時は、`docs/index.html`内の`APP_VERSION`定数を必ず更新する。
   設定タブに表示され、GitHub PagesのCDNキャッシュ（約10分）で旧バージョンが
@@ -31,4 +31,4 @@
   `modReceiptOCR.bas`も同期すべきか確認する（逆も同様）
 - スキーマ変更時はAlembicマイグレーションを追加し、`README.md`のセットアップ手順が
   古くなっていないか確認する
-- M.T.Works-hub側の`CURRENT_STATUS.md`のExpenseVBA/ExpenseWebセクション更新が必要か確認する
+- M.T.Works-hub側の`CURRENT_STATUS.md`のExpenseVBA/Shiden Expenseセクション更新が必要か確認する

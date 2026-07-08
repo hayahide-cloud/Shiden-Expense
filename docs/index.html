@@ -562,12 +562,14 @@
 <script>
 "use strict";
 
-// ===== 定数（ExpenseVBA / ExpenseWebと同一のスキーマ・文言を維持する） =====
+// ===== 定数（ExpenseVBA・フル構成版と同一のスキーマ・文言を維持する） =====
 const CATEGORIES = ["交通費", "会議費", "消耗品費", "交際費", "通信費", "雑費"];
-const SOURCE_MARKER = "(Lite取込)";
+const SOURCE_MARKER = "(Shiden取込)";
 // 1〜8列目はExpenseVBAの明細シートと同一。9列目の備考は整理用メモ、10〜11列目は按分計算の
 // 記録（いずれも末尾追加なので取込互換を壊さない）
 const CSV_HEADERS = ["取込日時", "領収書日付", "支払先", "金額", "勘定科目", "摘要", "元ファイル名", "要確認", "備考", "按分人数", "1人あたり請求額"];
+// 保存キーの"expenseweb_lite"は旧名だが、変更すると保存済みの明細・設定が見えなくなるため
+// データ継続を優先して意図的にそのまま使い続ける（IndexedDBのDB名も同様）
 const STORAGE_KEY = "expenseweb_lite_receipts";
 const SETTINGS_KEY = "expenseweb_lite_settings";
 const ACTIVE_PANEL_KEY = "expenseweb_lite_active_panel";
@@ -749,6 +751,7 @@ function loadSettings() {
 // localStorageは容量が小さい(約5MB)ため、画像はIndexedDBに保存する。
 // キーは明細行のid。行削除・全削除と連動して画像も削除する。
 
+// DB名は旧名だが、変更すると保存済みの証憑画像が見えなくなるため意図的にそのまま使う
 const DB_NAME = "expenseweb_lite";
 const IMAGE_STORE = "images";
 
