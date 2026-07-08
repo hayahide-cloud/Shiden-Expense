@@ -53,6 +53,13 @@
     color: #fff;
     letter-spacing: 0.01em;
   }
+  /* 紫電パレットと同じ稲妻バッジ（紫角丸＋稲妻）をタイトル左に置く */
+  header h1 .logo-badge {
+    width: 30px;
+    height: 30px;
+    vertical-align: -0.17em;
+    margin-right: 9px;
+  }
   /* タイトル後半だけ紫グラデーションの2トーンにする */
   header h1 .brand-grad {
     background: linear-gradient(90deg, #a78bfa, #7c3aed);
@@ -403,7 +410,18 @@
 <body>
 
 <header>
-  <h1><span class="brand-grad">Shiden</span> Expense</h1>
+  <h1><svg class="logo-badge" viewBox="0 0 512 512" aria-hidden="true">
+    <defs>
+      <linearGradient id="badge-bg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#6d28d9"/>
+      </linearGradient>
+      <linearGradient id="badge-bolt" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#fde047"/><stop offset="1" stop-color="#facc15"/>
+      </linearGradient>
+    </defs>
+    <rect width="512" height="512" rx="115" fill="url(#badge-bg)"/>
+    <path d="M296 66 L158 296 L248 296 L212 446 L376 218 L276 218 L336 66 Z" fill="url(#badge-bolt)"/>
+  </svg><span class="brand-grad">Shiden</span> Expense</h1>
   <p>領収書OCR取込 — サーバーレス版 / M.T.Works</p>
   <div class="header-underline"></div>
 </header>
@@ -574,7 +592,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-08.16 アイコン背景色の調整";
+const APP_VERSION = "2026-07-08.17 ロゴに稲妻バッジ";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
