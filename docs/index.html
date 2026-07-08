@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <!-- アプリとして使うためズームを無効化（誤ピンチ・誤ダブルタップで画面が崩れるのを防ぐ） -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>ExpenseWeb Lite</title>
+<title>Shiden Expense</title>
 <meta name="description" content="領収書を撮影してOCR取込するサーバーレス経費精算ツール">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -403,7 +403,7 @@
 <body>
 
 <header>
-  <h1>ExpenseWeb <span class="brand-grad">Lite</span></h1>
+  <h1>Shiden <span class="brand-grad">Expense</span></h1>
   <p>領収書OCR取込 — サーバーレス版 / M.T.Works</p>
   <div class="header-underline"></div>
 </header>
@@ -577,7 +577,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-08.10 依頼内容欄を1行に";
+const APP_VERSION = "2026-07-08.11 Shiden Expenseに改名";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [

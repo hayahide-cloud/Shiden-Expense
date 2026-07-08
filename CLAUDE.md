@@ -1,6 +1,6 @@
-# CLAUDE.md（ExpenseWeb）
+# CLAUDE.md（Shiden Expense）
 
-本リポジトリはM.T.Worksエコシステムの一プロジェクト。
+本リポジトリはM.T.Worksエコシステムの一プロジェクト（旧名: ExpenseWeb。2026-07に紫電ブランドへ改名）。
 全体の運用ルール・オーナーの嗜好は `hayahide-cloud/M.T.Works-hub` の CLAUDE.md を正本とする。
 
 ## このプロジェクト固有のルール
