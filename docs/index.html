@@ -445,12 +445,12 @@
     border: none;
     border-radius: 0;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 500;
-    padding: 10px 0 12px;
+    padding: 6px 0 4px;
     margin: 0;
   }
-  nav button .icon { display: block; font-size: 20px; margin-bottom: 2px; }
+  nav button .icon { display: block; font-size: 18px; margin-bottom: 1px; }
   nav button.active { color: var(--accent-soft); }
 
   .spinner {
@@ -692,7 +692,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-08.48 依頼内容・用途を2行・改行可に";
+const APP_VERSION = "2026-07-08.49 保存メッセージの自動消去・下部バーを狭く";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1258,13 +1258,23 @@ function showPanel(name) {
   localStorage.setItem(ACTIVE_PANEL_KEY, name);
 }
 
+let messageTimer = null;
 function showMessage(kind, text) {
+  if (messageTimer) { clearTimeout(messageTimer); messageTimer = null; }
   $("capture-message").innerHTML = "";
   if (!text) return;
   const div = document.createElement("div");
   div.className = `banner ${kind}`;
   div.textContent = text;
   $("capture-message").appendChild(div);
+  // 成功メッセージは数秒で自動的に消す（出しっぱなしにしない）。
+  // エラーは読んで対処してもらう必要があるため、次の操作まで残す
+  if (kind === "ok") {
+    messageTimer = setTimeout(() => {
+      $("capture-message").innerHTML = "";
+      messageTimer = null;
+    }, 4000);
+  }
 }
 
 // ===== 手動トリミング（四隅ドラッグ） =====
