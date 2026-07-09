@@ -728,7 +728,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-09.59 交通費ボタンを撮影ボタンと同じ大きさに";
+const APP_VERSION = "2026-07-09.60 交通費: 行程（区間の内訳）も取得して依頼内容・用途へ";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -755,7 +755,10 @@ const TRANSIT_PROMPT = [
   "to: 到着地の駅名・地名",
   "amount: 運賃の合計（数値のみ、カンマ・円記号なし）。IC運賃と切符運賃の両方がある場合はIC運賃を優先する",
   "line: 主に利用する路線名・交通機関名（例: JR山手線、東京メトロ丸ノ内線。複数ある場合は代表的な1つ）",
-  "推測でそれらしい値を作らず、読み取れない項目は from・to・line は空文字、amount は 0 にしてください。",
+  "legs: 経路の行程を順番に並べた文字列の配列。各要素は「出発地点→到着地点」の形式で、",
+  "徒歩・電車・バス等すべての区間を含める（例: [\"アーバンコート西日暮里→西日暮里駅\", \"西日暮里駅→東京駅\", \"東京駅→広島駅\"]）。",
+  "地点名は画像に表示されている名称をそのまま使い、画像に無い地点を補わない。",
+  "推測でそれらしい値を作らず、読み取れない項目は from・to・line は空文字、amount は 0、legs は空配列にしてください。",
 ].join("\n");
 
 // ===== コアロジック（テスト可能なようにグローバル関数にしている） =====
@@ -1296,6 +1299,11 @@ async function analyzeTransitImage(dataUrls) {
   const extracted = await callVisionApi(dataUrls, TRANSIT_PROMPT);
   const from = String(extracted.from ?? "").trim();
   const to = String(extracted.to ?? "").trim();
+  // 行程（区間ごとの内訳）。1行1区間で依頼内容・用途に入れる
+  // （改行対応済みのため一覧にもそのまま縦に並び、申請メールの本文にも入る）
+  const legs = Array.isArray(extracted.legs)
+    ? extracted.legs.map((s) => String(s).trim()).filter((s) => s !== "")
+    : [];
   // 経路スクショには日付が写らないことが多い。空なら当日移動の精算を想定して今日を既定にする
   return {
     date: String(extracted.date ?? "") || todayString(),
@@ -1303,6 +1311,7 @@ async function analyzeTransitImage(dataUrls) {
     amount: parseInt(extracted.amount, 10) || 0,
     category: "交通費",
     memo: (from && to ? `${from}→${to}` : "").slice(0, 20),
+    note: legs.join("\n"),
   };
 }
 
