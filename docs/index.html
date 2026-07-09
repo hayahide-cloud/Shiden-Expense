@@ -771,7 +771,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-09.65 画面キャプチャ: 取りこぼし防止と映像フレーム向け照合";
+const APP_VERSION = "2026-07-09.66 画面キャプチャ: 黒画面・無地フレームを取り込まない";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -2440,6 +2440,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("capture-step").classList.remove("screencapping");
   }
 
+  // 縮小グレースケールの輝度分散（無地・黒画面の判定用）
+  function screencapFrameVariance(g) {
+    let sum = 0, sumSq = 0;
+    for (let i = 0; i < g.gray.length; i++) {
+      const v = g.gray[i];
+      sum += v;
+      sumSq += v * v;
+    }
+    const n = g.gray.length;
+    return sumSq / n - (sum / n) ** 2;
+  }
+
   // 縮小グレースケール同士の平均輝度差（フレームの変化量）。寸法が違えば「別物」扱い
   function screencapFrameDiff(a, b) {
     if (!a || !b || a.width !== b.width || a.height !== b.height) return 255;
@@ -2480,6 +2492,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     const frame = grabScreencapFrame();
     if (!frame) return;
     const gray = toGrayScaled(frame, 100);
+    // 共有開始直後・タブ切り替えの瞬間などの黒画面／無地フレームは内容が無いため
+    // 取り込まない（先頭に黒いページが入って連結を壊す事故の防止）
+    if (screencapFrameVariance(gray) < 25) return;
     const lastAdded = screencapGrays.length > 0 ? screencapGrays[screencapGrays.length - 1] : null;
     if (lastAdded && screencapFrameDiff(gray, lastAdded) < 2) return; // 前ページとほぼ同じ画面
     pushScreencapPage(frame, gray);
@@ -2518,7 +2533,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("screencap-add-btn").addEventListener("click", () => {
     const frame = grabScreencapFrame();
     if (!frame) return;
-    if (!pushScreencapPage(frame)) {
+    const gray = toGrayScaled(frame, 100);
+    if (screencapFrameVariance(gray) < 25) {
+      showMessage("error", "画面がまだ映っていません（黒画面・無地は取り込めません）。共有中のタブを表示してから追加してください。");
+      return;
+    }
+    if (!pushScreencapPage(frame, gray)) {
       showMessage("error", `取り込めるページは${SCREENCAP_MAX_PAGES}枚までです。`);
     }
   });
