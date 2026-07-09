@@ -241,6 +241,20 @@
   /* 交通費のスクショ取込は補助的な入口のため、メインの撮影ボタンより低めにする */
   #transit-label { padding: 14px; margin-top: 10px; font-size: 14.5px; }
   .file-button.busy { pointer-events: none; opacity: 0.6; }
+  /* 連結結果の確認中は、撮影・取込の各ボタンを隠して確認に集中させる */
+  #capture-step.transit-previewing > h2,
+  #capture-step.transit-previewing .file-button,
+  #capture-step.transit-previewing #manual-btn { display: none; }
+  #transit-preview-img {
+    display: block;
+    width: 100%;
+    max-height: 55vh;
+    object-fit: contain;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: #000;
+    cursor: zoom-in;
+  }
   /* 手動トリミングエディタ（全画面の画像編集フェーズ）:
      写真選択中はbodyにcrop-fullscreenクラスを付け、ヘッダー・main・ナビを隠して
      このエディタだけを表示する。position:fixedは使わず、アプリシェル（bodyのflex列）の
@@ -537,6 +551,15 @@
         <input type="file" id="transit-input" accept="image/*" multiple>
       </label>
       <button id="manual-btn" class="ghost">手入力で追加</button>
+      <!-- 交通費: 連結結果の確認ステップ。結合した画像を確認してから「解析する」で
+           OCRを実行する（連結に問題がある場合にAPI呼び出しを無駄にしないため） -->
+      <div id="transit-preview" class="hidden">
+        <h2>連結結果を確認</h2>
+        <img id="transit-preview-img" alt="連結したスクリーンショット">
+        <p class="note" style="text-align: center;">タップで拡大表示できます</p>
+        <button id="transit-analyze-btn">解析する</button>
+        <button id="transit-cancel-btn" class="ghost">キャンセル</button>
+      </div>
     </div>
 
     <div id="form-step" class="card hidden">
@@ -705,7 +728,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-09.56 重なり照合を強化（後向き照合・全域検証・固定バー除去）";
+const APP_VERSION = "2026-07-09.57 交通費: 連結結果を確認してから解析する2段階に";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1884,6 +1907,25 @@ function updateSplitResult() {
     (remainder > 0 ? `（端数¥${remainder.toLocaleString()}は自分持ち）` : "");
 }
 
+// 交通費（経路スクショ）取込の確認ステップの状態。
+// 選択した各ページ（OCR用）と連結済み画像（証憑用）を「解析する」まで保持する
+let transitCanvases = null;
+let transitStitchedBlob = null;
+let transitPreviewUrl = null; // 確認表示用のobject URL（閉じる時に必ず解放する）
+
+// 連結結果の確認ステップを閉じ、選択前の状態に戻す
+function resetTransitPreview() {
+  $("transit-preview").classList.add("hidden");
+  $("capture-step").classList.remove("transit-previewing");
+  $("transit-preview-img").src = "";
+  if (transitPreviewUrl) {
+    URL.revokeObjectURL(transitPreviewUrl);
+    transitPreviewUrl = null;
+  }
+  transitCanvases = null;
+  transitStitchedBlob = null;
+}
+
 // 解析中の証憑画像と編集対象ID。フォームを閉じる時に必ずリセットする
 // （キャンセルした撮影画像が、次の編集保存時に誤って添付されるのを防ぐ）
 let currentImage = null;
@@ -2239,10 +2281,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // 交通費: 経路検索スクショの取込。スクショは傾き・影が無いためトリミング編集を
-  // スキップし、縮小してそのままOCR→確認・修正フォームへ進む（画像は証憑として保存）。
-  // スクロールスクショが撮れない画面用に複数枚選択に対応: OCRには全枚を個別に渡して
-  // 読み取り精度を保ち（縮小結合すると縦長になりすぎて文字が潰れる）、証憑用には縦に連結する
+  // 交通費: 経路検索スクショの取込（2段階）。
+  // 1段階目（ここ）: 選択した複数枚を縦に連結し、結果を画面で確認してもらう。
+  //   連結に問題があった場合にAPI呼び出しを無駄にしないため、この時点ではOCRしない。
+  // 2段階目（transit-analyze-btn）: 確認後に「解析する」でOCRを実行する。
+  // OCRには全枚を個別に渡して読み取り精度を保ち（縮小結合すると縦長になりすぎて
+  // 文字が潰れる）、証憑用には連結した1枚を使う
   $("transit-input").addEventListener("change", async () => {
     const files = Array.from($("transit-input").files);
     $("transit-input").value = "";
@@ -2258,42 +2302,78 @@ document.addEventListener("DOMContentLoaded", async () => {
     const label = $("transit-label");
     const textEl = $("transit-label-text");
     label.classList.add("busy");
-    textEl.innerHTML = '<span class="spinner"></span>運賃を解析中...';
+    textEl.innerHTML = '<span class="spinner"></span>画像を連結中...';
     try {
       // 連結時の重なり検出は元解像度のピクセル一致を利用するため、縮小せずに読み込む
       // （3600pxはiOS Safariのキャンバス面積上限に収まる安全値。スマホのスクショは通常これ以下）
       const canvases = [];
       for (const f of files) canvases.push(await loadCanvasFromFile(f, 3600));
       const stitched = stitchCanvasesVertically(canvases);
-      currentImage = await canvasToJpegBlob(stitched.canvas);
+      transitCanvases = canvases;
+      transitStitchedBlob = await canvasToJpegBlob(stitched.canvas);
+      // 連結結果の確認ステップを表示する
+      if (transitPreviewUrl) URL.revokeObjectURL(transitPreviewUrl);
+      transitPreviewUrl = URL.createObjectURL(transitStitchedBlob);
+      $("transit-preview-img").src = transitPreviewUrl;
+      $("transit-preview").classList.remove("hidden");
+      $("capture-step").classList.add("transit-previewing");
+      if (stitched.unmatchedSeams > 0) {
+        showMessage("warn",
+          `スクショの重なりを検出できなかった継ぎ目が${stitched.unmatchedSeams}カ所あります。` +
+          "その部分は共通の固定表示（バー等）だけ取り除いて縦に並べました（内容の欠落はありません）。連結結果をご確認ください。");
+      } else {
+        showMessage("", "");
+      }
+    } catch (err) {
+      resetTransitPreview();
+      showMessage("error", err.message);
+    } finally {
+      label.classList.remove("busy");
+      textEl.textContent = "🚃 交通費: 経路のスクショを取込";
+    }
+  });
+
+  // 交通費: 連結結果の確認後に解析を実行する
+  $("transit-analyze-btn").addEventListener("click", async () => {
+    if (!transitCanvases || !transitStitchedBlob) return;
+    const btn = $("transit-analyze-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>運賃を解析中...';
+    try {
       // OCRへは各ページを1800pxに縮小して個別に渡す
       const dataUrls = [];
-      for (const c of canvases) dataUrls.push(await canvasToJpegBlob(downscaleCanvas(c, 1800)).then(blobToDataUrl));
+      for (const c of transitCanvases) dataUrls.push(await canvasToJpegBlob(downscaleCanvas(c, 1800)).then(blobToDataUrl));
       const result = await analyzeTransitImage(dataUrls);
+      currentImage = transitStitchedBlob;
       editingId = null;
+      resetTransitPreview();
       openForm(result);
       resetImageToggle();
       editImageBlob = currentImage;
       $("image-toggle-wrap").classList.remove("hidden");
       showEditPreview();
-      // 重なりを検出できなかった継ぎ目がある場合は、証憑画像の状態を利用者に知らせる
-      // （欠落ではなく単純な縦並びになっただけなので、warnで表示して確認を促す）
-      if (stitched.unmatchedSeams > 0) {
-        showMessage("warn",
-          `スクショの重なりを検出できなかった継ぎ目が${stitched.unmatchedSeams}カ所あります。` +
-          "その部分は共通の固定表示（バー等）だけ取り除いて縦に並べました（内容の欠落はありません）。証憑画像をご確認ください。");
-      } else {
-        showMessage("", "");
-      }
+      showMessage("", "");
       // OCR結果を下書きとして保持する（画面更新でAPI呼び出し分の結果が失われないように）
       saveDraft();
       await putImage(DRAFT_IMAGE_ID, currentImage).catch(() => {});
     } catch (err) {
+      // 失敗時は確認ステップに留まり、再試行できるようにする
       showMessage("error", err.message + "（手入力でも追加できます）");
     } finally {
-      label.classList.remove("busy");
-      textEl.textContent = "🚃 交通費: 経路のスクショを取込";
+      btn.disabled = false;
+      btn.textContent = "解析する";
     }
+  });
+
+  // 交通費: 連結結果を破棄して選択前の状態に戻す
+  $("transit-cancel-btn").addEventListener("click", () => {
+    resetTransitPreview();
+    showMessage("", "");
+  });
+
+  // 連結画像をタップすると拡大ビューアで確認できる（継ぎ目のチェック用）
+  $("transit-preview-img").addEventListener("click", () => {
+    if ($("transit-preview-img").src) openImageViewer($("transit-preview-img").src);
   });
 
   // 写真選択のキャンセル。選んだ写真とその下書きを破棄して選択前の状態に戻す
