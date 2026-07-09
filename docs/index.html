@@ -238,8 +238,7 @@
     background: rgba(124, 58, 237, 0.08);
   }
   .file-button input { display: none; }
-  /* 交通費のスクショ取込は補助的な入口のため、メインの撮影ボタンより低めにする */
-  #transit-label { padding: 14px; margin-top: 10px; font-size: 14.5px; }
+  #transit-label { margin-top: 10px; }
   .file-button.busy { pointer-events: none; opacity: 0.6; }
   /* 連結結果の確認中は、撮影・取込の各ボタンを隠して確認に集中させる */
   #capture-step.transit-previewing > h2,
@@ -729,7 +728,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-09.58 一覧の依頼内容・用途に改行を反映";
+const APP_VERSION = "2026-07-09.59 交通費ボタンを撮影ボタンと同じ大きさに";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
