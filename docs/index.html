@@ -435,7 +435,8 @@
     cursor: pointer;
   }
   .receipt-item .row1 { display: flex; justify-content: space-between; align-items: baseline; }
-  .receipt-item .vendor { font-weight: 600; font-size: 15px; }
+  /* 主見出し（依頼内容・用途）は入力時の改行をそのまま表示する(pre-line) */
+  .receipt-item .vendor { font-weight: 600; font-size: 15px; white-space: pre-line; }
   .receipt-item .amount { font-size: 22px; font-weight: 700; color: var(--accent-soft); white-space: nowrap; }
   .receipt-item .amount-wrap { display: flex; flex-direction: column; align-items: flex-end; }
   .receipt-item .split-amount { font-size: 13px; font-weight: 600; color: var(--ok); white-space: nowrap; margin-top: 2px; }
@@ -728,7 +729,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-09.57 交通費: 連結結果を確認してから解析する2段階に";
+const APP_VERSION = "2026-07-09.58 一覧の依頼内容・用途に改行を反映";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
