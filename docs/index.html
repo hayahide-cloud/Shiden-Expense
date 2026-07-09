@@ -771,7 +771,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-09.64 画面キャプチャ: スクロールに合わせて自動取込";
+const APP_VERSION = "2026-07-09.65 画面キャプチャ: 取りこぼし防止と映像フレーム向け照合";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1644,7 +1644,10 @@ function toGrayScaled(canvas, targetW) {
 //     （同一端末の分割スクショは重なり部分のピクセルが一致するため、真の重なりはスコアほぼ0になる）
 // 縮小版だけで判定すると、真の重なりを位相ズレで見逃し、逆にほぼ無地の画像を誤結合してしまう
 // 戻り値は実ピクセル座標 { prevY, curY }。確信が持てなければnull（呼び出し側で単純連結にフォールバック）
-function findOverlap(prevCanvas, curCanvas) {
+// toleranceは照合スコア閾値の倍率（既定1）。画面キャプチャの映像フレームは
+// スクリーンショットと違いピクセルが完全一致しない（OSの表示スケーリングによる
+// 再サンプリング等）ため、キャプチャ由来の連結では緩めの閾値を使う
+function findOverlap(prevCanvas, curCanvas, tolerance = 1) {
   const W = 200; // 粗探索は幅200pxの縮小版で行う（速度と精度のバランス）
   const prev = toGrayScaled(prevCanvas, W);
   const cur = toGrayScaled(curCanvas, W);
@@ -1660,12 +1663,12 @@ function findOverlap(prevCanvas, curCanvas) {
   const candidates = [];
   for (const cand of matchStrips(cur, prev, [0.08, 0.15, 0.22, 0.3, 0.4], 0.25, 1.0)) {
     const tmplY = Math.round(cand.tmplY * toReal);
-    const r = refineMatch(prevFull, Math.round(cand.searchY * toReal), curFull, tmplY, toReal);
+    const r = refineMatch(prevFull, Math.round(cand.searchY * toReal), curFull, tmplY, toReal, tolerance);
     if (r) candidates.push({ prevY: r.y, curY: tmplY, refineScore: r.score });
   }
   for (const cand of matchStrips(prev, cur, [0.6, 0.68, 0.76, 0.84], 0.05, 0.75)) {
     const tmplY = Math.round(cand.tmplY * toReal);
-    const r = refineMatch(curFull, Math.round(cand.searchY * toReal), prevFull, tmplY, toReal);
+    const r = refineMatch(curFull, Math.round(cand.searchY * toReal), prevFull, tmplY, toReal, tolerance);
     if (r) candidates.push({ prevY: tmplY, curY: r.y, refineScore: r.score });
   }
   if (candidates.length === 0) return null;
@@ -1678,7 +1681,7 @@ function findOverlap(prevCanvas, curCanvas) {
   let best = null;
   for (const c of candidates) {
     const v = validateOffset(prevFull, curFull, c.prevY, c.curY);
-    if (v.span >= 40 && v.score <= 3 && (!best || v.score < best.v)) {
+    if (v.span >= 40 && v.score <= 3 * tolerance && (!best || v.score < best.v)) {
       best = { prevY: c.prevY, curY: c.curY, v: v.score };
     }
   }
@@ -1790,7 +1793,7 @@ function matchStrips(tmpl, search, fracs, searchFromFrac, searchToFrac) {
 // 精密照合: tmpl（実解像度グレースケール）のtmplY位置の帯を、searchのcenterY周辺
 // （±縮小2行分）で1px刻みに照合する。真の重なりはピクセルがほぼ一致するため、
 // 平均輝度差の閾値を厳しくして誤結合を防ぐ。一致すれば { y, score } を返す
-function refineMatch(search, centerY, tmpl, tmplY, toReal) {
+function refineMatch(search, centerY, tmpl, tmplY, toReal, tolerance = 1) {
   const width = search.width;
   const stripReal = Math.round(16 * toReal);
   if (tmplY + stripReal > tmpl.height) return null;
@@ -1813,7 +1816,7 @@ function refineMatch(search, centerY, tmpl, tmplY, toReal) {
     const score = sad / n;
     if (!best || score < best.score) best = { score, y };
   }
-  if (!best || best.score > 4) return null;
+  if (!best || best.score > 4 * tolerance) return null;
   return best;
 }
 
@@ -1824,7 +1827,7 @@ function refineMatch(search, centerY, tmpl, tmplY, toReal) {
 // 出力時にだけ幅1100px以下・面積14Mpx以下（iOS Safariのキャンバス上限対策）へ縮小する。
 // 戻り値: { canvas, unmatchedSeams } — unmatchedSeamsは重なりを検出できず
 // 単純連結にフォールバックした継ぎ目の数（呼び出し側で利用者への通知に使う）
-function stitchCanvasesVertically(canvases) {
+function stitchCanvasesVertically(canvases, tolerance = 1) {
   if (canvases.length === 1) return { canvas: canvases[0], unmatchedSeams: 0 };
   // 同一端末のスクショは幅が揃っている前提。異なる場合のみ最小幅へ揃える（照合精度は落ちる）
   const minWidth = Math.min(...canvases.map((c) => c.width));
@@ -1834,7 +1837,7 @@ function stitchCanvasesVertically(canvases) {
   const cuts = aligned.map((c) => ({ start: 0, end: c.height }));
   let unmatchedSeams = 0;
   for (let i = 1; i < aligned.length; i++) {
-    const ov = findOverlap(aligned[i - 1], aligned[i]);
+    const ov = findOverlap(aligned[i - 1], aligned[i], tolerance);
     // findOverlapは重なり範囲全体の検証を通過した候補しか返さないため、そのまま信頼する
     // （スクロール量が少なく、前の画像の大半が重複しているのが正しい場合もある）
     if (ov) {
@@ -2334,10 +2337,30 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 文字が潰れる）、証憑用には連結した1枚を使う。
   // 入口はファイル選択とクリップボード貼り付け（PC向け）の2つで、共通処理はここに集約。
   // appendがtrueなら確認ステップ表示中の追加ページとして既存の選択に連結し直す
-  // 連結して確認ステップを表示する共通処理（ファイル選択・貼り付け・画面キャプチャの終点）
-  async function presentTransitCanvases(canvases) {
-    const stitched = stitchCanvasesVertically(canvases);
-    transitCanvases = canvases;
+  // 連結後の画像をOCR用に縦に分割する。画面キャプチャは取込ページ数が多く
+  // 重複も多いため、ページをそのまま送るのではなく、重複を除去済みの連結画像を
+  // 読みやすい高さで切り直して送る（枚数と重複の両方を減らせる）
+  function sliceCanvasVertically(src, maxH) {
+    const out = [];
+    for (let y = 0; y < src.height; y += maxH) {
+      const h = Math.min(maxH, src.height - y);
+      const c = document.createElement("canvas");
+      c.width = src.width;
+      c.height = h;
+      c.getContext("2d").drawImage(src, 0, y, src.width, h, 0, 0, src.width, h);
+      out.push(c);
+    }
+    return out;
+  }
+
+  // 連結して確認ステップを表示する共通処理（ファイル選択・貼り付け・画面キャプチャの終点）。
+  // opts.tolerance: 重なり照合の許容度（画面キャプチャの映像フレームは緩め）
+  // opts.sliceForOcr: trueならOCRには元ページではなく連結画像の分割を使う
+  async function presentTransitCanvases(canvases, opts = {}) {
+    const stitched = stitchCanvasesVertically(canvases, opts.tolerance ?? 1);
+    transitCanvases = opts.sliceForOcr
+      ? sliceCanvasVertically(stitched.canvas, 1400).slice(0, 8)
+      : canvases;
     transitStitchedBlob = await canvasToJpegBlob(stitched.canvas);
     if (transitPreviewUrl) URL.revokeObjectURL(transitPreviewUrl);
     transitPreviewUrl = URL.createObjectURL(transitStitchedBlob);
@@ -2396,7 +2419,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   let screencapStream = null;
   let screencapCanvases = [];
   let screencapGrays = []; // 取込済み各ページの縮小グレースケール（自動取込の変化判定用）
-  let screencapLastSample = null; // 直前のサンプルフレーム（スクロール停止＝安定の判定用）
   let screencapTimer = null;
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
@@ -2413,7 +2435,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       screencapStream = null;
     }
     screencapGrays = [];
-    screencapLastSample = null;
     $("screencap-video").srcObject = null;
     $("screencap-panel").classList.add("hidden");
     $("capture-step").classList.remove("screencapping");
@@ -2439,7 +2460,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 1ページとして取り込む（自動・手動共通）
   function pushScreencapPage(frame, gray) {
-    if (screencapCanvases.length >= 8) return false;
+    if (screencapCanvases.length >= SCREENCAP_MAX_PAGES) return false;
     screencapCanvases.push(frame);
     screencapGrays.push(gray ?? toGrayScaled(frame, 100));
     $("screencap-count").textContent = String(screencapCanvases.length);
@@ -2447,19 +2468,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     return true;
   }
 
-  // 自動取込: 共有中の画面を定期サンプリングし、「スクロールが止まった」かつ
-  // 「最後に取り込んだページから内容が変わった」フレームを自動でページに追加する。
-  // 利用者は共有中のタブでゆっくりスクロールするだけでよく、ボタンを押して回る必要がない
+  // 自動取込: 共有中の画面を定期サンプリングし、「最後に取り込んだページから内容が
+  // 変わった」フレームを自動でページに追加する。スクロール中のフレームも取り込む
+  // （ブラウザのスクロールは描画が完結したフレームしか出ないためブレは無い。
+  //   静止時だけ取り込む方式だと、止まらずにスクロールした区間が丸ごと欠けてしまう）。
+  // 利用者は共有中のタブでゆっくりスクロールするだけでよく、ボタンを押して回る必要がない。
+  // 取り込みすぎたページ（重複だらけ）は連結エンジンが1枚にまとめるので問題ない
+  const SCREENCAP_MAX_PAGES = 20;
   function screencapAutoSample() {
+    if (screencapCanvases.length >= SCREENCAP_MAX_PAGES) return;
     const frame = grabScreencapFrame();
     if (!frame) return;
     const gray = toGrayScaled(frame, 100);
-    const stable = screencapLastSample !== null && screencapFrameDiff(gray, screencapLastSample) < 0.8;
-    screencapLastSample = gray;
-    if (!stable) return; // スクロール中・切り替え中のフレームは取り込まない
     const lastAdded = screencapGrays.length > 0 ? screencapGrays[screencapGrays.length - 1] : null;
-    if (lastAdded && screencapFrameDiff(gray, lastAdded) < 3) return; // 前ページと同じ画面
-    if (screencapCanvases.length >= 8) return;
+    if (lastAdded && screencapFrameDiff(gray, lastAdded) < 2) return; // 前ページとほぼ同じ画面
     pushScreencapPage(frame, gray);
   }
 
@@ -2474,7 +2496,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     screencapCanvases = [];
     screencapGrays = [];
-    screencapLastSample = null;
     $("screencap-count").textContent = "0";
     $("screencap-video").srcObject = screencapStream;
     $("screencap-panel").classList.remove("hidden");
@@ -2498,7 +2519,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const frame = grabScreencapFrame();
     if (!frame) return;
     if (!pushScreencapPage(frame)) {
-      showMessage("error", "取り込めるページは8枚までです。");
+      showMessage("error", `取り込めるページは${SCREENCAP_MAX_PAGES}枚までです。`);
     }
   });
 
@@ -2512,7 +2533,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     screencapCanvases = [];
     stopScreencap();
     try {
-      await presentTransitCanvases(canvases);
+      await presentTransitCanvases(canvases, { tolerance: 2.5, sliceForOcr: true });
     } catch (err) {
       resetTransitPreview();
       showMessage("error", err.message);
