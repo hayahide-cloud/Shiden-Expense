@@ -584,11 +584,12 @@
         <h2>画面キャプチャで取込</h2>
         <video id="screencap-video" autoplay muted playsinline></video>
         <p class="note" style="text-align: center;">
-          共有中のタブで経路を1画面ずつスクロールしながら「このページを追加」を押してください
-          （現在 <span id="screencap-count">0</span> ページ）
+          共有中のタブに切り替えて、経路を<strong>ゆっくりスクロール</strong>してください。
+          画面が止まるたびに自動でページを取り込みます（現在 <span id="screencap-count">0</span> ページ）。
+          最後までスクロールしたらこのタブに戻り、「連結して確認へ」を押してください
         </p>
-        <button id="screencap-add-btn">➕ このページを追加</button>
         <button id="screencap-done-btn">連結して確認へ</button>
+        <button id="screencap-add-btn" class="ghost">➕ 手動でこのページを追加</button>
         <button id="screencap-cancel-btn" class="ghost">キャンセル</button>
       </div>
       <!-- 交通費: 連結結果の確認ステップ。結合した画像を確認してから「解析する」で
@@ -770,7 +771,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-09.63 画面キャプチャでのスクロールスクショ取込（PC限定）";
+const APP_VERSION = "2026-07-09.64 画面キャプチャ: スクロールに合わせて自動取込";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -2394,19 +2395,72 @@ document.addEventListener("DOMContentLoaded", async () => {
   // iOS Safariは非対応のため、ボタン自体をPC（対応ブラウザ）でのみ表示する
   let screencapStream = null;
   let screencapCanvases = [];
+  let screencapGrays = []; // 取込済み各ページの縮小グレースケール（自動取込の変化判定用）
+  let screencapLastSample = null; // 直前のサンプルフレーム（スクロール停止＝安定の判定用）
+  let screencapTimer = null;
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
     $("screencap-btn").classList.add("hidden");
   }
 
   function stopScreencap() {
+    if (screencapTimer) {
+      clearInterval(screencapTimer);
+      screencapTimer = null;
+    }
     if (screencapStream) {
       screencapStream.getTracks().forEach((t) => t.stop());
       screencapStream = null;
     }
+    screencapGrays = [];
+    screencapLastSample = null;
     $("screencap-video").srcObject = null;
     $("screencap-panel").classList.add("hidden");
     $("capture-step").classList.remove("screencapping");
+  }
+
+  // 縮小グレースケール同士の平均輝度差（フレームの変化量）。寸法が違えば「別物」扱い
+  function screencapFrameDiff(a, b) {
+    if (!a || !b || a.width !== b.width || a.height !== b.height) return 255;
+    let sad = 0;
+    for (let i = 0; i < a.gray.length; i++) sad += Math.abs(a.gray[i] - b.gray[i]);
+    return sad / a.gray.length;
+  }
+
+  function grabScreencapFrame() {
+    const video = $("screencap-video");
+    if (!video.videoWidth) return null;
+    const c = document.createElement("canvas");
+    c.width = video.videoWidth;
+    c.height = video.videoHeight;
+    c.getContext("2d").drawImage(video, 0, 0);
+    return c;
+  }
+
+  // 1ページとして取り込む（自動・手動共通）
+  function pushScreencapPage(frame, gray) {
+    if (screencapCanvases.length >= 8) return false;
+    screencapCanvases.push(frame);
+    screencapGrays.push(gray ?? toGrayScaled(frame, 100));
+    $("screencap-count").textContent = String(screencapCanvases.length);
+    showToast(`${screencapCanvases.length}ページ目を取り込みました`);
+    return true;
+  }
+
+  // 自動取込: 共有中の画面を定期サンプリングし、「スクロールが止まった」かつ
+  // 「最後に取り込んだページから内容が変わった」フレームを自動でページに追加する。
+  // 利用者は共有中のタブでゆっくりスクロールするだけでよく、ボタンを押して回る必要がない
+  function screencapAutoSample() {
+    const frame = grabScreencapFrame();
+    if (!frame) return;
+    const gray = toGrayScaled(frame, 100);
+    const stable = screencapLastSample !== null && screencapFrameDiff(gray, screencapLastSample) < 0.8;
+    screencapLastSample = gray;
+    if (!stable) return; // スクロール中・切り替え中のフレームは取り込まない
+    const lastAdded = screencapGrays.length > 0 ? screencapGrays[screencapGrays.length - 1] : null;
+    if (lastAdded && screencapFrameDiff(gray, lastAdded) < 3) return; // 前ページと同じ画面
+    if (screencapCanvases.length >= 8) return;
+    pushScreencapPage(frame, gray);
   }
 
   $("screencap-btn").addEventListener("click", async () => {
@@ -2419,10 +2473,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       return; // 共有ダイアログのキャンセル。何もしない
     }
     screencapCanvases = [];
+    screencapGrays = [];
+    screencapLastSample = null;
     $("screencap-count").textContent = "0";
     $("screencap-video").srcObject = screencapStream;
     $("screencap-panel").classList.remove("hidden");
     $("capture-step").classList.add("screencapping");
+    // タブ以外（ウィンドウ・画面全体）の共有では、このアプリへ切り替えた瞬間の画面が
+    // 混入してしまうため、タブの共有を推奨する
+    const surface = screencapStream.getVideoTracks()[0].getSettings().displaySurface;
+    if (surface && surface !== "browser") {
+      showMessage("warn", "ウィンドウ／画面全体が共有されています。経路の「タブ」を選んで共有し直すことをおすすめします（このアプリの画面が混入するのを防ぐため）。");
+    }
+    screencapTimer = setInterval(screencapAutoSample, 400);
     // ブラウザ側の「共有を停止」で終了された場合も取込画面を閉じる
     screencapStream.getVideoTracks()[0].addEventListener("ended", () => {
       screencapCanvases = [];
@@ -2430,27 +2493,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
-  // 現在の映像フレームを1ページとして取り込む
+  // 手動での取り込み（自動で拾われなかった場合の補助）
   $("screencap-add-btn").addEventListener("click", () => {
-    const video = $("screencap-video");
-    if (!video.videoWidth) return;
-    if (screencapCanvases.length >= 8) {
+    const frame = grabScreencapFrame();
+    if (!frame) return;
+    if (!pushScreencapPage(frame)) {
       showMessage("error", "取り込めるページは8枚までです。");
-      return;
     }
-    const c = document.createElement("canvas");
-    c.width = video.videoWidth;
-    c.height = video.videoHeight;
-    c.getContext("2d").drawImage(video, 0, 0);
-    screencapCanvases.push(c);
-    $("screencap-count").textContent = String(screencapCanvases.length);
-    showToast(`${screencapCanvases.length}ページ目を追加しました`);
   });
 
   // 取り込んだページを連結して、通常の確認ステップへ進む
   $("screencap-done-btn").addEventListener("click", async () => {
     if (screencapCanvases.length === 0) {
-      showMessage("error", "先に「このページを追加」でページを取り込んでください。");
+      showMessage("error", "まだページが取り込まれていません。共有中のタブで経路をスクロールしてください。");
       return;
     }
     const canvases = screencapCanvases;
