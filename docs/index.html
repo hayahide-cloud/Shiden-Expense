@@ -788,7 +788,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-10.77 共有開始時にタブへ自動で切り替わらない";
+const APP_VERSION = "2026-07-10.78 キャプチャ感度・上限強化（250ms/50枚）";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1683,7 +1683,9 @@ function findOverlap(prevCanvas, curCanvas, tolerance = 1) {
     const r = refineMatch(prevFull, Math.round(cand.searchY * toReal), curFull, tmplY, toReal, tolerance);
     if (r) candidates.push({ prevY: r.y, curY: tmplY, refineScore: r.score, tmplVariance: r.tmplVariance });
   }
-  for (const cand of matchStrips(prev, cur, [0.6, 0.68, 0.76, 0.84], 0.05, 0.75)) {
+  // 帯の位置を密にして、無地の多いページ（余白の広い経路詳細等）でも
+  // どれかの帯が文字・罫線に載るようにする（無地の帯は分散不足でスキップされる）
+  for (const cand of matchStrips(prev, cur, [0.5, 0.56, 0.62, 0.68, 0.74, 0.8, 0.86], 0.05, 0.75)) {
     const tmplY = Math.round(cand.tmplY * toReal);
     const r = refineMatch(curFull, Math.round(cand.searchY * toReal), prevFull, tmplY, toReal, tolerance);
     if (r) candidates.push({ prevY: tmplY, curY: r.y, refineScore: r.score, tmplVariance: r.tmplVariance });
@@ -1981,7 +1983,12 @@ function stitchCanvasesVertically(canvases, tolerance = 1, maxWidth = 1920) {
   }
 
   const totalHeight = cuts.reduce((sum, c) => sum + (c.end - c.start), 0);
-  const MAX_AREA = 14_000_000; // 上限16.7Mpxに対する安全マージン
+  // キャンバス面積の上限はiOS Safariが16.7Mpxと厳しく、超えると縮小せざるを得ない。
+  // PC（Chrome等）の上限ははるかに大きいため、長い経路でも縮小せず原寸を保てるよう
+  // iOS以外では上限を広げる（iPadOSはMacintoshを名乗るためタッチ点数でも判定）
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.userAgent.includes("Macintosh") && navigator.maxTouchPoints > 1);
+  const MAX_AREA = isIOS ? 14_000_000 : 48_000_000;
   let scale = Math.min(1, maxWidth / minWidth);
   if (minWidth * totalHeight * scale * scale > MAX_AREA) {
     scale = Math.sqrt(MAX_AREA / (minWidth * totalHeight));
@@ -2495,7 +2502,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   async function presentTransitCanvases(canvases, opts = {}) {
     const stitched = stitchCanvasesVertically(canvases, opts.tolerance ?? 1);
     transitCanvases = opts.sliceForOcr
-      ? sliceCanvasVertically(stitched.canvas, 1400).slice(0, 8)
+      ? sliceCanvasVertically(stitched.canvas, 1400).slice(0, 12)
       : canvases;
     // 連結スクショはPNG（無劣化・原寸）で保存する。文字中心のスクショは原本性を優先する
     // オーナー判断（容量はJPEGの3〜5倍になるが、メール添付・表示への影響は許容）。
@@ -2624,11 +2631,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function grabScreencapFrame() {
     const video = $("screencap-video");
     if (!video.videoWidth) return null;
-    const c = document.createElement("canvas");
-    c.width = video.videoWidth;
-    c.height = video.videoHeight;
-    c.getContext("2d").drawImage(video, 0, 0);
-    return c;
+    return screencapScaledCanvas(video, video.videoWidth, video.videoHeight);
   }
 
   // 1ページとして取り込む（自動・手動共通）
@@ -2647,8 +2650,26 @@ document.addEventListener("DOMContentLoaded", async () => {
   //   静止時だけ取り込む方式だと、止まらずにスクロールした区間が丸ごと欠けてしまう）。
   // 利用者は共有中のタブでゆっくりスクロールするだけでよく、ボタンを押して回る必要がない。
   // 取り込みすぎたページ（重複だらけ）は連結エンジンが1枚にまとめるので問題ない
-  const SCREENCAP_MAX_PAGES = 20;
+  const SCREENCAP_MAX_PAGES = 50;
+  // 取込ページの幅上限。連結出力の幅上限（1920px）と同じ値にする。
+  // 4Kで取り込んでも最終出力は1920px幅に縮小されるため、取込時に縮めておいても
+  // 最終品質は一切変わらず、50ページ分のメモリを1/4に抑えられる。
+  // さらに「裏タブでは低解像度・表に出すと4K」のような解像度の揺れも、
+  // 縮小後は同じ寸法に揃うことが多く、取り直し（ページ破棄）の頻度が減る
+  const SCREENCAP_MAX_WIDTH = 1920;
   let screencapSizeMismatch = 0;
+
+  // 映像フレーム/video要素を、幅上限を適用したキャンバスに描き起こす
+  function screencapScaledCanvas(source, w, h) {
+    const scale = Math.min(1, SCREENCAP_MAX_WIDTH / w);
+    const c = document.createElement("canvas");
+    c.width = Math.round(w * scale);
+    c.height = Math.round(h * scale);
+    const ctx = c.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(source, 0, 0, c.width, c.height);
+    return c;
+  }
 
   // フレームを1ページとして採用するかの判定（タイマー方式・ストリーム方式共通）
   function screencapConsiderFrame(frame) {
@@ -2680,7 +2701,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // 取り込まない（先頭に黒いページが入って連結を壊す事故の防止）
     if (screencapFrameVariance(gray) < 25) return;
     const lastAdded = screencapGrays.length > 0 ? screencapGrays[screencapGrays.length - 1] : null;
-    if (lastAdded && screencapFrameDiff(gray, lastAdded) < 2) return; // 前ページとほぼ同じ画面
+    // 前ページとほぼ同じ画面は取り込まない。閾値は小さめ（=感度高め）にして
+    // 少しのスクロールでもページを重ねる（ページ同士の重なりが大きいほど
+    // 連結時の照合が確実になり、継ぎ目の失敗＝内容の二重化が起きにくい）
+    if (lastAdded && screencapFrameDiff(gray, lastAdded) < 1) return;
     pushScreencapPage(frame, gray);
   }
 
@@ -2704,17 +2728,15 @@ document.addEventListener("DOMContentLoaded", async () => {
           while (true) {
             const { value: frame, done } = await screencapReader.read();
             if (done) break;
-            // 全フレームを処理する必要はないため約400ms間隔に間引く（timestampはマイクロ秒）
+            // 全フレームを処理する必要はないため約250ms間隔に間引く（timestampはマイクロ秒）。
+            // 間隔が短いほどスクロール中の取りこぼしが減り、連結の重なりも大きくなる
             const ts = frame.timestamp ?? 0;
-            if (ts - lastSampleTs < 400000) {
+            if (ts - lastSampleTs < 250000) {
               frame.close();
               continue;
             }
             lastSampleTs = ts;
-            const c = document.createElement("canvas");
-            c.width = frame.displayWidth;
-            c.height = frame.displayHeight;
-            c.getContext("2d").drawImage(frame, 0, 0);
+            const c = screencapScaledCanvas(frame, frame.displayWidth, frame.displayHeight);
             frame.close();
             screencapConsiderFrame(c);
           }
@@ -2723,7 +2745,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
       })();
     } else {
-      screencapTimer = setInterval(screencapAutoSample, 400);
+      screencapTimer = setInterval(screencapAutoSample, 250);
     }
   }
 
