@@ -256,17 +256,22 @@
     border-radius: 12px;
     border: 1px solid var(--border);
   }
-  /* 連結結果の確認中・画面キャプチャ中は、取込の各入口を隠して作業に集中させる */
+  /* 連結結果の確認中・画面キャプチャ中は、取込の各入口を隠して作業に集中させる
+     （.ghostは手入力2つと画面キャプチャの各ボタンをまとめて指す） */
   #capture-step.transit-previewing > h2,
   #capture-step.transit-previewing > .file-button,
   #capture-step.transit-previewing > .paste-hint,
-  #capture-step.transit-previewing > #screencap-btn,
-  #capture-step.transit-previewing > #manual-btn,
+  #capture-step.transit-previewing > .ghost,
   #capture-step.screencapping > h2,
   #capture-step.screencapping > .file-button,
   #capture-step.screencapping > .paste-hint,
-  #capture-step.screencapping > #screencap-btn,
-  #capture-step.screencapping > #manual-btn { display: none; }
+  #capture-step.screencapping > .ghost { display: none; }
+  /* 2つ目の大項目（交通費）の見出しは、前の項目との区切りを付ける */
+  #capture-step .section-heading {
+    margin-top: 26px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+  }
   .file-button.busy { pointer-events: none; opacity: 0.6; }
   #transit-preview-img {
     display: block;
@@ -556,7 +561,8 @@
     <div id="capture-message"></div>
 
     <div id="capture-step" class="card">
-      <h2>領収書を撮影</h2>
+      <!-- 取込の入口は「購入費・立替費」と「交通費」の2つの大項目に分ける -->
+      <h2>購入費・立替費の精算</h2>
       <label class="file-button">
         📷 タップして撮影 / 画像を選択
         <!-- capture属性を付けるとカメラが強制起動してしまうため付けない。
@@ -566,12 +572,15 @@
              順になる（iOS側の仕様）。動画はOCR解析できないため、選択時にJS側で弾く -->
         <input type="file" id="image-input" accept="image/*,video/*">
       </label>
+      <button id="manual-btn" class="ghost">手入力で追加</button>
+
+      <h2 class="section-heading">交通費の精算</h2>
       <!-- 交通費: Googleマップ等の経路検索のスクショから運賃を読み取る。
            スクショは紙と違い傾き・影が無いため、トリミング編集をスキップして直接OCRする -->
       <!-- multiple: スクロールスクショが撮れない画面用に、分割スクショを複数枚まとめて
            選択できる（上から順に選ぶ）。OCRには全枚をそのまま渡し、証憑用には縦に連結する -->
       <label class="file-button" id="transit-label">
-        <span id="transit-label-text">🚃 交通費: 経路のスクショを取込</span>
+        <span id="transit-label-text">🚃 経路のスクリーンショットを選択</span>
         <input type="file" id="transit-input" accept="image/*" multiple>
       </label>
       <!-- PC向けの操作ヒント。タッチ端末（スマホ）では非表示 -->
@@ -579,7 +588,8 @@
       <!-- PC限定: 画面キャプチャ（getDisplayMedia）で別タブの経路画面を1ページずつ取り込み、
            既存の重なり連結エンジンでスクロールスクショ相当の1枚に繋ぐ -->
       <button id="screencap-btn" class="ghost">🖥️ 画面キャプチャで取込（PC）</button>
-      <button id="manual-btn" class="ghost">手入力で追加</button>
+      <!-- 交通費の手入力: 勘定科目を交通費・日付を今日で開く -->
+      <button id="transit-manual-btn" class="ghost">手入力で追加</button>
       <div id="screencap-panel" class="hidden">
         <h2>画面キャプチャで取込</h2>
         <video id="screencap-video" autoplay muted playsinline></video>
@@ -788,7 +798,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-10.79 継ぎ目を余白に寄せる・最終画面を必ず取込";
+const APP_VERSION = "2026-07-10.80 取込タブを購入費/交通費の2項目に整理";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -2586,7 +2596,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       showMessage("error", err.message);
     } finally {
       label.classList.remove("busy");
-      textEl.textContent = "🚃 交通費: 経路のスクショを取込";
+      textEl.textContent = "🚃 経路のスクリーンショットを選択";
     }
   }
 
@@ -3089,6 +3099,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     currentImage = null;
     editingId = null;
     openForm({ date: "", vendor: "", amount: 0, category: "", memo: "" });
+    saveDraft();
+  });
+
+  // 交通費の手入力（証憑画像なし）: 勘定科目を交通費に、日付を今日にして開く
+  // （交通費のOCR取込と同じ初期値。摘要に行程を直接書く使い方を想定）
+  $("transit-manual-btn").addEventListener("click", () => {
+    currentImage = null;
+    editingId = null;
+    openForm({ date: todayString(), vendor: "", amount: 0, category: "交通費", memo: "" });
     saveDraft();
   });
 
