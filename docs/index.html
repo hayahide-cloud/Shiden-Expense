@@ -788,7 +788,7 @@ const DRAFT_IMAGE_ID = "__draft__";
 const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写真（リロード復元用）
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-10.78 キャプチャ感度・上限強化（250ms/50枚）";
+const APP_VERSION = "2026-07-10.79 継ぎ目を余白に寄せる・最終画面を必ず取込";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1953,6 +1953,42 @@ function refineMatch(search, centerY, tmpl, tmplY, toReal, tolerance = 1) {
 // 単純連結にフォールバックした継ぎ目の数（呼び出し側で利用者への通知に使う）
 // maxWidthは出力の幅上限。iPhoneスクショ(幅1290px)やPC画面キャプチャを縮小せず
 // 原寸のまま残せる値にしている（縮小＋再圧縮は文字のぼけの原因になる）
+// 継ぎ目の位置を、重なり範囲内で最も「静かな」（＝横方向の輝度変化が少ない＝
+// 文字や罫線の無い）行までずらす量を返す。cur側の行のにぎやかさで判定する。
+// 継ぎ目をどこにずらしても連結後の総高さは変わらない（prev側とcur側が同量動くため）
+function quietSeamShift(prevCanvas, curCanvas, prevY, curY) {
+  const overlap = Math.min(prevCanvas.height - prevY, curCanvas.height - curY);
+  const span = Math.min(overlap - 1, 300); // 探索は継ぎ目から300px先まで（十分に余白が見つかる範囲）
+  if (span <= 0) return 0;
+  const w = curCanvas.width;
+  const step = Math.max(1, Math.floor(w / 256)); // 列は間引いて十分
+  const data = curCanvas.getContext("2d").getImageData(0, curY, w, span).data;
+  const rowBusy = (d) => {
+    let busy = 0;
+    let last = -1;
+    const base = d * w * 4;
+    for (let x = 0; x < w; x += step) {
+      const i = base + x * 4;
+      const lum = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      if (last >= 0) busy += Math.abs(lum - last);
+      last = lum;
+    }
+    return busy;
+  };
+  let best = 0;
+  let bestScore = Infinity;
+  for (let d = 0; d + 2 < span; d++) {
+    // 1行だけの偶然の静けさを拾わないよう、3行分をまとめて評価する
+    const score = rowBusy(d) + rowBusy(d + 1) + rowBusy(d + 2);
+    if (score < bestScore) {
+      bestScore = score;
+      best = d + 1; // 静かな3行の真ん中で切り替える
+      if (score === 0) break;
+    }
+  }
+  return best;
+}
+
 function stitchCanvasesVertically(canvases, tolerance = 1, maxWidth = 1920) {
   if (canvases.length === 1) return { canvas: canvases[0], unmatchedSeams: 0 };
   // 同一端末のスクショは幅が揃っている前提。異なる場合のみ最小幅へ揃える（照合精度は落ちる）
@@ -1970,8 +2006,11 @@ function stitchCanvasesVertically(canvases, tolerance = 1, maxWidth = 1920) {
     if (ov && (ov.validated ||
         (ov.prevY - cuts[i - 1].start > aligned[i - 1].height * 0.2 &&
          ov.curY < aligned[i].height * 0.75))) {
-      cuts[i - 1].end = ov.prevY;
-      cuts[i].start = ov.curY;
+      // 継ぎ目は重なり範囲内の「静かな行」（余白など内容の少ない行）まで下げる。
+      // 照合が数pxずれていても、文字・罫線の無い行で切り替われば見た目に破綻が出ない
+      const shift = quietSeamShift(aligned[i - 1], aligned[i], ov.prevY, ov.curY);
+      cuts[i - 1].end = ov.prevY + shift;
+      cuts[i].start = ov.curY + shift;
     } else {
       unmatchedSeams++;
       // 重なり位置は特定できなくても、共通の固定UI（ステータスバー・操作バー等）が
@@ -2867,6 +2906,22 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 取り込んだページを連結して、通常の確認ステップへ進む
   $("screencap-done-btn").addEventListener("click", async () => {
+    // 今見えている画面を最後のページとして必ず取り込む。最後のひとスクロールが
+    // 小さいと自動取込の変化判定（閾値1）に満たず、ページ最下部が欠けたまま
+    // 連結されることがあるため。前ページと完全に同じ画面なら追加しない
+    const finalFrame = grabScreencapFrame();
+    if (finalFrame) {
+      const gray = toGrayScaled(finalFrame, 100);
+      const first = screencapCanvases[0];
+      const sameDims = !first ||
+        (finalFrame.width === first.width && finalFrame.height === first.height);
+      if (sameDims && screencapFrameVariance(gray) >= 25) {
+        const lastAdded = screencapGrays.length > 0 ? screencapGrays[screencapGrays.length - 1] : null;
+        if (!lastAdded || screencapFrameDiff(gray, lastAdded) > 0.05) {
+          pushScreencapPage(finalFrame, gray);
+        }
+      }
+    }
     if (screencapCanvases.length === 0) {
       showMessage("error", "まだページが取り込まれていません。共有中のタブで経路をスクロールしてください。");
       return;
