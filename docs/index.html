@@ -919,7 +919,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-11.97 証憑を全PNG化し明細CSVを埋め込み";
+const APP_VERSION = "2026-07-11.98 交通費の日付は読めなければ空のまま";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1605,9 +1605,12 @@ async function analyzeTransitImage(dataUrls, opts = {}) {
     const rounded = distanceKm >= 10 ? Math.round(distanceKm) : Math.round(distanceKm * 10) / 10;
     memoLines.push(`距離: 約${rounded}km`);
   }
-  // 経路スクショには日付が写らないことが多い。空なら当日移動の精算を想定して今日を既定にする
+  // 経路スクショには日付が写らないことが多い（時刻はあっても日付は無い）。
+  // 読めなければ勝手に補わず空のままにし、要確認バナーで入力を促す
+  // （以前は「今日」を既定にしていたが、後日まとめて取り込むと誤った日付になるため廃止）。
+  // opts.defaultDateは再解析時に既存の日付を据え置くためだけに使う
   return {
-    date: String(extracted.date ?? "") || opts.defaultDate || todayString(),
+    date: String(extracted.date ?? "") || opts.defaultDate || "",
     vendor: String(extracted.line ?? "").trim(),
     amount: parseInt(extracted.amount, 10) || 0,
     category: "交通費",
