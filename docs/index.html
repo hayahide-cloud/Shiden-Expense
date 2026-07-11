@@ -285,11 +285,13 @@
     color: var(--purchase);
     background: rgba(251, 191, 36, 0.07);
   }
-  #capture-step #transit-label {
+  #capture-step #transit-label,
+  #capture-step .file-button.transit-photo {
     border-color: var(--transit);
     color: var(--transit);
     background: rgba(45, 212, 191, 0.07);
   }
+  #capture-step .file-button.transit-photo { margin-top: 10px; }
   #manual-btn { color: var(--purchase); }
   #transit-manual-btn, #screencap-btn { color: var(--transit); }
   #capture-step .section-hotel { color: var(--hotel); }
@@ -648,6 +650,12 @@
       <!-- PC限定: 画面キャプチャ（getDisplayMedia）で別タブの経路画面を1ページずつ取り込み、
            既存の重なり連結エンジンでスクロールスクショ相当の1枚に繋ぐ -->
       <button id="screencap-btn" class="ghost">🖥️ 画面キャプチャで取込（PC）</button>
+      <!-- タクシー等の紙のレシート用: 撮影フローは購入費と同じ（トリミング→レシートOCR）で、
+           勘定科目だけ交通費に固定される -->
+      <label class="file-button transit-photo">
+        🚕 タップして撮影 / 画像を選択
+        <input type="file" id="transit-photo-input" accept="image/*,video/*">
+      </label>
       <!-- 交通費の手入力: 勘定科目を交通費・日付を今日で開く -->
       <button id="transit-manual-btn" class="ghost">手入力で追加</button>
 
@@ -895,7 +903,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-10.91 宿泊費に宿泊終了日（期間）を追加";
+const APP_VERSION = "2026-07-10.92 交通費にレシート撮影の入口を追加";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -2204,7 +2212,10 @@ function applyAnalysisToForm(result) {
   $("f-date").value = result.date || $("f-date").value;
   $("f-vendor").value = result.vendor || $("f-vendor").value;
   if (result.amount) $("f-amount").value = formatAmountForInput(result.amount);
-  if (result.category && curCategory !== "宿泊費") $("f-category").value = result.category;
+  // 交通費・宿泊費の明細は入口で種別が確定しているため、OCRの科目判定では変えない
+  if (result.category && curCategory !== "宿泊費" && curCategory !== "交通費") {
+    $("f-category").value = result.category;
+  }
   updateDateToVisibility();
   // 宿泊終了日は宿泊費の明細でOCRが期間を読み取れた場合のみ反映
   if (result.date_to && $("f-category").value === "宿泊費") $("f-date-to").value = result.date_to;
@@ -2364,6 +2375,7 @@ function closeForm() {
   $("capture-step").classList.remove("hidden");
   $("image-input").value = "";
   $("hotel-input").value = "";
+  $("transit-photo-input").value = "";
   setReceiptCategoryPreset("");
   resetCropEditor();
   currentImage = null;
@@ -2713,6 +2725,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   $("image-input").addEventListener("change", () => onReceiptFileChosen($("image-input"), ""));
   $("hotel-input").addEventListener("change", () => onReceiptFileChosen($("hotel-input"), "宿泊費"));
+  // タクシー等の紙のレシート: レシートOCRで読み、勘定科目だけ交通費に固定する
+  $("transit-photo-input").addEventListener("change", () => onReceiptFileChosen($("transit-photo-input"), "交通費"));
 
   // 手入力などで証憑画像の無い既存明細に、後から写真を追加して解析する。
   // 交通費: スクショを直接解析（複数枚選択時は重なり連結して1枚に）。トリミング不要のため
@@ -2725,7 +2739,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       showMessage("error", "写真を選択してください（動画は取り込めません）。");
       return;
     }
-    if ($("f-category").value !== "交通費") {
+    // 交通費でも、カメラ写真（JPEG/HEIC）はタクシー等のレシートとしてトリミング→レシートOCRへ。
+    // 経路スクショ（iPhone/PCのスクリーンショットはPNG）だけを経路として直接解析する
+    const allPng = files.every((f) => f.type === "image/png");
+    if ($("f-category").value !== "交通費" || !allPng) {
       await openCropForFile(files[0]);
       return;
     }
@@ -3260,7 +3277,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
       const curCategory = $("f-category").value;
       let result;
-      if (curCategory === "交通費") {
+      // 交通費でも、証憑がJPEGならタクシー等のレシート写真（撮影取込はJPEG保存）なので
+      // レシートOCRで読む。経路スクショの連結証憑は常にPNG保存のためPNGで判別できる
+      if (curCategory === "交通費" && editImageBlob.type === "image/png") {
         // 連結スクショは縦長のことがあるため、取込時と同じく分割して送る
         // （原寸で読み込む。端末内の画像は同じ端末で作られたものなのでキャンバス上限に収まる）
         const canvas = await loadCanvasFromFile(editImageBlob, 100000);
@@ -3291,6 +3310,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     resetCropEditor();
     $("image-input").value = "";
     $("hotel-input").value = "";
+    $("transit-photo-input").value = "";
     setReceiptCategoryPreset("");
     deleteImage(CROP_DRAFT_IMAGE_ID).catch(() => {});
     showMessage("", "");
@@ -3353,6 +3373,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       resetCropEditor();
       $("image-input").value = "";
       $("hotel-input").value = "";
+      $("transit-photo-input").value = "";
       openForm(result);
       // 証憑画像は既定で表示にして開く（画像とOCR結果を見比べて確認する画面のため。
       // 画像保存ボタンは保存後の明細にのみ出す仕様のためここでは表示しない）
