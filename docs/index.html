@@ -641,7 +641,7 @@
         <!-- accept="image/*"のみだとiOSの選択シートが「写真ライブラリ/写真を撮る/ファイルを選択」の
              順になる。video/*も含めることで「写真を撮る/写真またはビデオを選択/ファイルを選択」の
              順になる（iOS側の仕様）。動画はOCR解析できないため、選択時にJS側で弾く -->
-        <input type="file" id="image-input" accept="image/*,video/*">
+        <input type="file" id="image-input" accept="image/*,video/*,application/pdf">
       </label>
       <button id="manual-btn" class="ghost">手入力で追加</button>
 
@@ -663,7 +663,7 @@
            （トリミング→レシートOCR）で、勘定科目だけ交通費に固定される -->
       <label class="file-button transit-photo">
         🎫 タップして撮影 / 画像を選択
-        <input type="file" id="transit-photo-input" accept="image/*,video/*">
+        <input type="file" id="transit-photo-input" accept="image/*,video/*,application/pdf">
       </label>
       <!-- 交通費の手入力: 勘定科目を交通費・日付を今日で開く -->
       <button id="transit-manual-btn" class="ghost">手入力で追加</button>
@@ -673,7 +673,7 @@
            この入口から取り込んだ明細は勘定科目を宿泊費に固定する（入口が種別を決める） -->
       <label class="file-button hotel">
         🏨 タップして撮影 / 画像を選択
-        <input type="file" id="hotel-input" accept="image/*,video/*">
+        <input type="file" id="hotel-input" accept="image/*,video/*,application/pdf">
       </label>
       <button id="hotel-manual-btn" class="ghost">手入力で追加</button>
       <div id="screencap-panel" class="hidden">
@@ -733,7 +733,7 @@
            保存を押すと証憑画像として添付される -->
       <label class="file-button hidden" id="edit-add-photo">
         📷 写真を追加して解析
-        <input type="file" id="edit-photo-input" accept="image/*" multiple>
+        <input type="file" id="edit-photo-input" accept="image/*,application/pdf" multiple>
       </label>
       <label>依頼内容・用途
         <!-- 2行・改行可。改行を含む値もCSV側でエスケープされ、一覧表示では1行に畳まれる -->
@@ -919,7 +919,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-10.95 一覧の並び替え（追加順/日付順）";
+const APP_VERSION = "2026-07-11.96 PDF領収書の取込に対応（pdf.js）";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -2219,6 +2219,71 @@ function canvasToJpegBlob(canvas, quality = 0.85) {
   });
 }
 
+// ===== PDF読み込み（pdf.js） =====
+// PDFの領収書（楽天トラベル等）を画像化して、写真と同じ証憑・OCRフローに乗せる。
+// pdf.jsは本プロジェクト初のサードパーティ依存（PDFレンダラーの自前実装は非現実的なため。
+// DECISIONS.md参照）。vendor/pdfjs/ に同梱し、PDFが選ばれたときだけ遅延読み込みする
+let pdfjsLoadPromise = null;
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (!pdfjsLoadPromise) {
+    pdfjsLoadPromise = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "vendor/pdfjs/pdf.min.js";
+      s.onload = () => {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdfjs/pdf.worker.min.js";
+        resolve(window.pdfjsLib);
+      };
+      s.onerror = () => {
+        pdfjsLoadPromise = null;
+        reject(new Error("PDF表示ライブラリの読み込みに失敗しました。通信環境を確認して再度お試しください。"));
+      };
+      document.head.appendChild(s);
+    });
+  }
+  return pdfjsLoadPromise;
+}
+
+// PDFをキャンバスに描画して1枚の画像にする。複数ページは縦に単純連結（重なりは無いため）。
+// 幅は既存の証憑画像の上限と同じ1800px相当。ページ数はiOS Safariのキャンバス
+// 面積上限（16.7Mpx）に収まるよう最大3ページまで
+async function pdfToCanvas(file) {
+  const pdfjs = await loadPdfJs();
+  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pages = [];
+  const count = Math.min(doc.numPages, 3);
+  for (let i = 1; i <= count; i++) {
+    const page = await doc.getPage(i);
+    const base = page.getViewport({ scale: 1 });
+    const scale = Math.min(3, 1800 / base.width);
+    const viewport = page.getViewport({ scale });
+    const c = document.createElement("canvas");
+    c.width = Math.round(viewport.width);
+    c.height = Math.round(viewport.height);
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    pages.push(c);
+  }
+  doc.destroy().catch(() => {});
+  if (pages.length === 1) return pages[0];
+  const width = Math.max(...pages.map((p) => p.width));
+  const height = pages.reduce((sum, p) => sum + p.height, 0);
+  const out = document.createElement("canvas");
+  out.width = width;
+  out.height = height;
+  const ctx = out.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, width, height);
+  let y = 0;
+  for (const p of pages) {
+    ctx.drawImage(p, 0, y);
+    y += p.height;
+  }
+  return out;
+}
+
 // OCR結果を編集中フォームへ反映する（再解析・写真の後付けで共通）。
 // 依頼内容・用途と按分人数は利用者の記入のため上書きせず、
 // 読み取れなかった項目（空・0）は現在の値を据え置く。
@@ -2726,14 +2791,58 @@ document.addEventListener("DOMContentLoaded", async () => {
   async function onReceiptFileChosen(input, categoryPreset) {
     const file = input.files[0];
     if (!file) return;
+    // PDFの領収書（楽天トラベル等）: 画像化して直接OCRへ。デジタル文書のため
+    // 傾き・影の補正（トリミングエディタ）は不要
+    if (file.type === "application/pdf") {
+      input.value = "";
+      await handlePdfChosen(file, categoryPreset, input.closest("label"));
+      return;
+    }
     if (!file.type.startsWith("image/")) {
       input.value = "";
       resetCropEditor();
-      showMessage("error", "動画は取り込めません。写真を選択してください。");
+      showMessage("error", "動画は取り込めません。写真またはPDFを選択してください。");
       return;
     }
     setReceiptCategoryPreset(categoryPreset);
     await openCropForFile(file);
+  }
+
+  // PDF領収書の取込: 画像化→レシートOCR→フォーム反映。証憑はJPEGで保存する
+  // （新規取込と、編集中の「写真を追加して解析」の両方から使う）
+  async function handlePdfChosen(file, categoryPreset, labelEl) {
+    if (labelEl) labelEl.classList.add("busy");
+    try {
+      const canvas = await pdfToCanvas(file);
+      const evidenceBlob = await canvasToJpegBlob(canvas, 0.9);
+      // 複数ページで縦長になった場合は、文字がつぶれないよう分割してOCRへ送る
+      const slices = canvas.height > 2200 ? sliceCanvasVertically(canvas, 1400).slice(0, 12) : [canvas];
+      const dataUrls = [];
+      for (const c of slices) dataUrls.push(await canvasToJpegBlob(downscaleCanvas(c, 1800)).then(blobToDataUrl));
+      const result = await analyzeImage(dataUrls);
+      if (categoryPreset) result.category = categoryPreset;
+      currentImage = evidenceBlob;
+      if (editingId) {
+        // 既存明細への後付け: 編集中のフォームへ反映（保存時に証憑として添付）
+        applyAnalysisToForm(result);
+        attachEditPreview(currentImage);
+        showMessage("ok", "PDFを解析して反映しました。保存すると証憑画像として添付されます。");
+        return;
+      }
+      openForm(result);
+      resetImageToggle();
+      editImageBlob = currentImage;
+      $("image-toggle-wrap").classList.remove("hidden");
+      showEditPreview();
+      showMessage("", "");
+      // OCR結果を下書きとして保持する（画面更新でAPI呼び出し分の結果が失われないように）
+      saveDraft();
+      await putImage(DRAFT_IMAGE_ID, currentImage).catch(() => {});
+    } catch (err) {
+      showMessage("error", err.message);
+    } finally {
+      if (labelEl) labelEl.classList.remove("busy");
+    }
   }
   // 選択した写真をトリミングエディタで開く（新規取込・編集中の写真後付けで共通）
   async function openCropForFile(file) {
@@ -2760,10 +2869,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 宿泊費・購入費等: トリミングエディタを経由（レシート写真は傾き補正が要るため）。
   //   エディタの「解析する」時点でeditingIdが入ったままなので、結果は編集中のフォームへ反映される
   $("edit-photo-input").addEventListener("change", async () => {
-    const files = Array.from($("edit-photo-input").files).filter((f) => f.type.startsWith("image/"));
+    const all = Array.from($("edit-photo-input").files);
     $("edit-photo-input").value = "";
+    // PDF領収書の後付け: 画像化→レシートOCR→編集中フォームへ反映
+    const pdf = all.find((f) => f.type === "application/pdf");
+    if (pdf) {
+      await handlePdfChosen(pdf, "", $("edit-add-photo"));
+      return;
+    }
+    const files = all.filter((f) => f.type.startsWith("image/"));
     if (files.length === 0) {
-      showMessage("error", "写真を選択してください（動画は取り込めません）。");
+      showMessage("error", "写真またはPDFを選択してください（動画は取り込めません）。");
       return;
     }
     // 交通費でも、カメラ写真（JPEG/HEIC）はタクシー等のレシートとしてトリミング→レシートOCRへ。
