@@ -536,6 +536,15 @@
 
   .summary { display: flex; justify-content: space-between; align-items: center; margin: 14px 2px; font-size: 13px; color: var(--muted); }
   .summary .total { font-size: 16px; font-weight: 700; color: var(--text); }
+  /* 並び順セレクタ: 件数と合計の間に置くコンパクト表示（入力欄の全幅スタイルを打ち消す） */
+  .summary #sort-order {
+    display: inline-block;
+    width: auto;
+    margin: 0;
+    padding: 6px 10px;
+    font-size: 13px;
+    border-radius: 8px;
+  }
 
   .char-counter { float: right; font-size: 11px; }
 
@@ -787,6 +796,12 @@
     </div>
     <div class="summary">
       <span id="count-label">0件</span>
+      <!-- 並び順: 追加順（取り込んだ順・新しい順）/ 日付順（領収書日付の新しい順）。
+           選択は記録され、次回開いたときも引き継がれる -->
+      <select id="sort-order">
+        <option value="created">追加順</option>
+        <option value="date">日付順</option>
+      </select>
       <span class="total" id="total-label">¥0</span>
     </div>
     <div id="receipt-list"></div>
@@ -887,6 +902,7 @@ const CSV_HEADERS = ["取込日時", "領収書日付", "支払先", "金額", "
 const STORAGE_KEY = "shiden_expense_receipts";
 const SETTINGS_KEY = "shiden_expense_settings";
 const ACTIVE_PANEL_KEY = "shiden_expense_active_panel";
+const SORT_ORDER_KEY = "shiden_expense_sort_order"; // 一覧の並び順（created=追加順 / date=日付順）
 const ACTIVE_EDIT_KEY = "shiden_expense_active_edit_id";
 const DRAFT_KEY = "shiden_expense_draft";
 const DRAFT_IMAGE_ID = "__draft__";
@@ -903,7 +919,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-10.94 交通費レシート撮影の絵文字を🎫に";
+const APP_VERSION = "2026-07-10.95 一覧の並び替え（追加順/日付順）";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -2517,7 +2533,18 @@ function getFormReceipt() {
 function renderList() {
   const month = $("month-filter").value;
   const rows = loadReceipts().filter((r) => !month || r.date.startsWith(month + "-"));
-  rows.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  // 並び順: 追加順=取り込んだ順の新しい順 / 日付順=領収書日付の新しい順
+  // （日付なしは末尾へ。同じ日付の中では追加順）
+  if ($("sort-order").value === "date") {
+    rows.sort((a, b) => {
+      if (!a.date && !b.date) return b.created_at.localeCompare(a.created_at);
+      if (!a.date) return 1;
+      if (!b.date) return -1;
+      return b.date.localeCompare(a.date) || b.created_at.localeCompare(a.created_at);
+    });
+  } else {
+    rows.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }
 
   $("count-label").textContent = `${rows.length}件`;
   const total = rows.reduce((sum, r) => sum + Number(r.amount), 0);
@@ -3634,6 +3661,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 月フィルタ
   $("month-filter").addEventListener("change", renderList);
+
+  // 一覧の並び順。選択をlocalStorageに記録し、次回開いたときも引き継ぐ
+  $("sort-order").value = localStorage.getItem(SORT_ORDER_KEY) === "date" ? "date" : "created";
+  $("sort-order").addEventListener("change", () => {
+    localStorage.setItem(SORT_ORDER_KEY, $("sort-order").value);
+    renderList();
+  });
 
   // エクスポート対象の明細を取得する（月フィルタ適用・取込順）
   function getExportRows() {
