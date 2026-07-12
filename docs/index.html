@@ -943,7 +943,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-11.104 PNGから復元・永続化・エクスポートUI復帰";
+const APP_VERSION = "2026-07-12.105 キャンセル時の下書き削除を確実に";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -3711,14 +3711,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     if ($("transit-preview-img").src) openImageViewer($("transit-preview-img").src);
   });
 
-  // 写真選択のキャンセル。選んだ写真とその下書きを破棄して選択前の状態に戻す
-  $("crop-cancel-btn").addEventListener("click", () => {
+  // 写真選択のキャンセル。選んだ写真とその下書きを破棄して選択前の状態に戻す。
+  // 下書きの削除は完了を待つ（投げっぱなしだと、直後にリロードされた場合に
+  // 削除が間に合わず破棄したはずの写真が復元されることがある）
+  $("crop-cancel-btn").addEventListener("click", async () => {
     resetCropEditor();
     $("image-input").value = "";
     $("hotel-input").value = "";
     $("transit-photo-input").value = "";
     setReceiptCategoryPreset("");
-    deleteImage(CROP_DRAFT_IMAGE_ID).catch(() => {});
+    await deleteImage(CROP_DRAFT_IMAGE_ID).catch(() => {});
     showMessage("", "");
   });
 
