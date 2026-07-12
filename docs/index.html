@@ -928,7 +928,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-11.101 交通費に往復区分（往路/復路/往復）";
+const APP_VERSION = "2026-07-11.102 往復選択で×2計算を摘要に明示";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -3695,8 +3695,35 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("form-step").addEventListener("input", () => saveDraft());
   $("form-step").addEventListener("change", () => saveDraft());
 
-  // 勘定科目を切り替えたら宿泊終了日欄の表示を追従させる
+  // 勘定科目を切り替えたら宿泊終了日・往復区分欄の表示を追従させる
   $("f-category").addEventListener("change", updateCategoryFields);
+
+  // 往復区分で「往復」を選んだら、片道運賃を2倍にして計算式を摘要に1行残す
+  // （見えない自動計算にせず「往復: ¥210 × 2 = ¥420」と明示する）。
+  // 往復をやめたら、その行から片道運賃を読み取って金額を戻し、行を消す。
+  // 金額が未入力のときは何もしない（金額を入れてから往復を選び直せば計算される）
+  const ROUND_TRIP_LINE = /^往復: ¥([\d,]+) × 2 = ¥[\d,]+$/;
+  $("f-trip-type").addEventListener("change", () => {
+    const memoLines = $("f-memo").value === "" ? [] : $("f-memo").value.split("\n");
+    const idx = memoLines.findIndex((l) => ROUND_TRIP_LINE.test(l));
+    if ($("f-trip-type").value === "往復") {
+      if (idx >= 0) return; // 既に往復計算済み（二重に2倍しない）
+      const oneWay = parseAmountInput($("f-amount").value);
+      if (!oneWay) return;
+      $("f-amount").value = formatAmountForInput(oneWay * 2);
+      memoLines.push(`往復: ¥${oneWay.toLocaleString()} × 2 = ¥${(oneWay * 2).toLocaleString()}`);
+      $("f-memo").value = memoLines.join("\n");
+    } else if (idx >= 0) {
+      const oneWay = parseAmountInput(memoLines[idx].match(ROUND_TRIP_LINE)[1]);
+      if (oneWay) $("f-amount").value = formatAmountForInput(oneWay);
+      memoLines.splice(idx, 1);
+      $("f-memo").value = memoLines.join("\n");
+    } else {
+      return;
+    }
+    updateSplitResult();
+    saveDraft();
+  });
 
   // 金額入力: 入力のたびにカンマ区切りへ整形する（数字以外は破棄）
   $("f-amount").addEventListener("input", (e) => {
