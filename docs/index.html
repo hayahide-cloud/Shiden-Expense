@@ -792,8 +792,7 @@
 
   <!-- 一覧タブ -->
   <section id="panel-list" class="panel">
-    <!-- 一旦非表示にしているだけで機能は残す。再度使う場合はhiddenクラスを外す -->
-    <div class="card hidden">
+    <div class="card">
       <h2>絞り込み・エクスポート</h2>
       <label>対象月
         <input type="month" id="month-filter">
@@ -842,9 +841,25 @@
       <a id="openai-usage-link" class="ghost link-btn" href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener">📊 OpenAIの利用状況を見る</a>
     </div>
     <div class="card">
+      <h2>データの復元</h2>
+      <!-- このアプリが保存・書き出す証憑PNGには明細CSVが埋め込まれている（iTXtチャンク）。
+           端末のデータが消えても、書き出しておいたPNGを選ぶだけで明細ごと復元できる -->
+      <label class="file-button" id="restore-label">
+        🛟 証憑PNGから明細を復元
+        <input type="file" id="restore-input" accept="image/png" multiple>
+      </label>
+      <p class="note">このアプリで保存・書き出した証憑PNG（ZIPエクスポートや「証憑画像を保存」で
+        書き出したもの）には明細データが埋め込まれています。端末のデータが消えた場合でも、
+        そのPNGを選ぶだけで明細と証憑をまとめて復元できます。重複する明細は自動でスキップされます。</p>
+      <p class="note" id="restore-result" style="text-align: center;"></p>
+    </div>
+    <div class="card">
       <h2>データ管理</h2>
       <button id="clear-btn" class="ghost">全明細を削除</button>
       <p class="note">データを整理する時に使います。この操作は取り消せません。</p>
+      <!-- ストレージの使用量と永続化の状態。永続化は起動時にnavigator.storage.persist()で
+           要求している（許可されるとiOS等のストレージ逼迫時の自動削除対象から外れやすくなる） -->
+      <p class="note" id="storage-info" style="text-align: center;"></p>
     </div>
     <!-- GitHub PagesのCDNキャッシュ(10分)で旧バージョンが表示されることがあるため、
          いま表示中のバージョンを確認できるようにしている -->
@@ -928,7 +943,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-11.103 往復に復路の日付（期間）を追加";
+const APP_VERSION = "2026-07-11.104 PNGから復元・永続化・エクスポートUI復帰";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1470,6 +1485,114 @@ async function extractCsvFromPng(blob) {
   return null;
 }
 
+// buildCsv形式のCSVテキストをレコード配列に分解する簡易パーサー
+// （引用符内の改行・カンマ・""エスケープに対応。復元専用で汎用CSVは想定しない）
+function parseCsv(text) {
+  if (text.startsWith("\ufeff")) text = text.slice(1);
+  const records = [];
+  let field = "";
+  let record = [];
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += ch;
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      record.push(field); field = "";
+    } else if (ch === "\r" || ch === "\n") {
+      if (ch === "\r" && text[i + 1] === "\n") i++;
+      record.push(field); field = "";
+      records.push(record); record = [];
+    } else field += ch;
+  }
+  if (field !== "" || record.length > 0) { record.push(field); records.push(record); }
+  return records.filter((r) => !(r.length === 1 && r[0] === ""));
+}
+
+// 証憑PNGに埋め込んだ明細CSVから明細を復元する。列は名前で対応付けるため、
+// 列構成が古い時期のPNG（宿泊終了日の旧列名等）でも復元できる。
+// 重複判定は「取込日時・金額・支払先が一致」。画像は埋め込み入りの原本をそのまま保存する
+async function restoreFromPngFiles(files) {
+  const rows = loadReceipts();
+  let restored = 0, dup = 0, noData = 0, failed = 0;
+  for (const file of files) {
+    try {
+      const csv = file.type === "image/png" ? await extractCsvFromPng(file) : null;
+      if (!csv) { noData++; continue; }
+      const records = parseCsv(csv);
+      if (records.length < 2) { noData++; continue; }
+      const header = records[0];
+      const rec = records[1];
+      const get = (name) => {
+        const i = header.indexOf(name);
+        return i >= 0 ? String(rec[i] ?? "") : "";
+      };
+      const createdRaw = get("取込日時");
+      const amount = parseInt(get("金額").replace(/,/g, ""), 10) || 0;
+      const vendor = get("支払先");
+      if (rows.some((r) => formatDateTime(r.created_at) === createdRaw && Number(r.amount) === amount && r.vendor === vendor)) {
+        dup++;
+        continue;
+      }
+      const row = {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+        date: get("領収書日付"),
+        date_to: get("終了日") || get("宿泊終了日"), // 旧列名にも対応
+        trip_type: get("往復区分"),
+        vendor,
+        amount,
+        category: get("勘定科目"),
+        memo: get("摘要"),
+        note: get("備考"),
+        split_people: parseInt(get("按分人数"), 10) || null,
+        created_at: createdRaw && !isNaN(new Date(createdRaw).getTime())
+          ? new Date(createdRaw).toISOString()
+          : new Date().toISOString(),
+        filename: get("元ファイル名"),
+      };
+      row.needs_review = computeNeedsReview(row.date, row.vendor, row.amount, row.category);
+      if (!row.filename || row.filename === SOURCE_MARKER || row.filename === "(手入力)") {
+        row.filename = makeImageFilename(row, "png");
+      }
+      await putImage(row.id, file);
+      rows.push(row);
+      restored++;
+    } catch {
+      failed++;
+    }
+  }
+  saveReceipts(rows);
+  const parts = [`${restored}件を復元しました`];
+  const skipped = [];
+  if (dup) skipped.push(`重複${dup}件`);
+  if (noData) skipped.push(`明細データなし${noData}件`);
+  if (failed) skipped.push(`読込失敗${failed}件`);
+  if (skipped.length) parts.push(`（${skipped.join("・")}はスキップ）`);
+  return parts.join("");
+}
+
+// 設定タブ: ストレージ使用量と永続化の状態を表示する
+async function updateStorageInfo() {
+  const el = $("storage-info");
+  if (!navigator.storage || !navigator.storage.estimate) {
+    el.textContent = "";
+    return;
+  }
+  try {
+    const est = await navigator.storage.estimate();
+    const mb = (n) => (Number(n || 0) / (1024 * 1024)).toFixed(1);
+    const persisted = navigator.storage.persisted ? await navigator.storage.persisted() : false;
+    el.textContent = `保存領域: ${mb(est.usage)}MB使用（上限 約${mb(est.quota)}MB）・永続化: ${persisted ? "有効" : "未許可"}`;
+  } catch {
+    el.textContent = "";
+  }
+}
+
 // 証憑ブロブがPNGなら明細CSVを埋め込んで返す（失敗時・PNG以外は元のまま返す）
 async function embedRowIntoImage(blob, row) {
   if (!blob || blob.type !== "image/png") return blob;
@@ -1660,8 +1783,15 @@ function showPanel(name) {
   $(`panel-${name}`).classList.add("active");
   document.querySelector(`nav button[data-panel="${name}"]`).classList.add("active");
   if (name === "list") renderList();
+  if (name === "settings") updateStorageInfo();
   // 画面更新後も同じタブを表示し続けられるよう、開いたタブを記録する
   localStorage.setItem(ACTIVE_PANEL_KEY, name);
+}
+
+// ブラウザにデータの永続化を要求する。許可されると、ストレージ逼迫時の
+// 自動削除（特にiOSのPWAデータ削除）の対象から外れやすくなる。結果は設定タブに表示
+if (navigator.storage && navigator.storage.persist) {
+  navigator.storage.persist().catch(() => {});
 }
 
 let messageTimer = null;
@@ -3706,6 +3836,26 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 勘定科目を切り替えたら宿泊終了日・往復区分欄の表示を追従させる
   $("f-category").addEventListener("change", updateCategoryFields);
+
+  // 証憑PNGからの明細復元（設定タブ）
+  $("restore-input").addEventListener("change", async () => {
+    const files = Array.from($("restore-input").files);
+    $("restore-input").value = "";
+    if (files.length === 0) return;
+    const label = $("restore-label");
+    label.classList.add("busy");
+    $("restore-result").textContent = "復元中...";
+    try {
+      const summary = await restoreFromPngFiles(files);
+      $("restore-result").textContent = summary;
+      showToast(summary);
+      updateStorageInfo();
+    } catch (err) {
+      $("restore-result").textContent = "復元に失敗しました: " + err.message;
+    } finally {
+      label.classList.remove("busy");
+    }
+  });
 
   // 往復区分で「往復」を選んだら、片道運賃を2倍にして計算式を摘要に1行残す
   // （見えない自動計算にせず「往復: ¥210 × 2 = ¥420」と明示する）。

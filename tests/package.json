@@ -1,0 +1,8 @@
+{
+  "name": "shiden-expense-tests",
+  "private": true,
+  "description": "Shiden ExpenseのPlaywright E2Eテスト（docs/index.htmlをfile://で直接検証）",
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}
