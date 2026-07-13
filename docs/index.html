@@ -7,6 +7,7 @@
 <title>Shiden Expense</title>
 <meta name="description" content="領収書を撮影してOCR取込するサーバーレス経費精算ツール">
 <link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="紫電Expense">
@@ -943,7 +944,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-12.105 キャンセル時の下書き削除を確実に";
+const APP_VERSION = "2026-07-13.106 ブラウザタブに紫電ファビコンを追加";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
