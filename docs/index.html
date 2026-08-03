@@ -799,9 +799,12 @@
         <input type="month" id="month-filter">
       </label>
       <button id="export-zip-btn">ZIPエクスポート（CSV＋証憑画像）</button>
+      <button id="export-xlsx-btn" class="ghost">Excelエクスポート（1明細1シート＋写真）</button>
       <button id="export-btn" class="ghost">CSVのみエクスポート</button>
       <p class="note">ZIPにはCSVと証憑画像（元ファイル名列で紐づく）が含まれます。CSVはUTF-8(BOM付き)。
-        OneDriveに保存し、ExpenseVBAの明細シートへ取り込めます。</p>
+        OneDriveに保存し、ExpenseVBAの明細シートへ取り込めます。<br>
+        Excelは先頭に一覧シート、続いて明細ごとに1シート（項目＋証憑写真）が入ります。
+        写真は閲覧用に縮小されるため、原本が必要な場合はZIPを使ってください。</p>
     </div>
     <div class="summary">
       <span id="count-label">0件</span>
@@ -974,7 +977,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-16.113 アイコンの領収書を0.92倍に微調整";
+const APP_VERSION = "2026-07-16.114 Excelエクスポート（1明細1シート＋写真）を追加";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1928,6 +1931,197 @@ function buildZip(entries) {
   return new Blob([...localParts, ...centralParts, new Uint8Array(eocd.buffer)], {
     type: "application/zip",
   });
+}
+
+// ===== Excelエクスポート（1明細1シート・自前実装） =====
+// .xlsxの実体はZIP+XML（Office Open XML）。ZIPは自前実装(buildZip・無圧縮)を流用し、
+// ライブラリなしで生成する。先頭に「一覧」シート、続いて明細1件につき1シート
+// （文字データ＋証憑写真をdrawing XMLで貼り付け）という構成。
+// 写真は閲覧用に長辺1200pxのJPEGへ縮小して埋め込む（原本はZIP/GitHub側が持つ役割分担）
+
+const xmlEscape = (v) => String(v ?? "")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+// シート名の制約: 31文字以内・[ ] : * ? / \ 禁止・重複不可。
+// 連番プレフィックスで一意性と並び順を保証する
+function xlsxSheetName(row, index) {
+  const date = (row.date || "日付なし").replaceAll("-", "").slice(4); // MMDD
+  const vendor = (row.vendor || "支払先なし").replace(/[\[\]:*?\/\\'"]/g, "").slice(0, 12);
+  return `${String(index + 1).padStart(2, "0")}_${date}_${vendor}`.slice(0, 31);
+}
+
+// セル1つ分のXML。type: "s"=文字（折り返し）, "h"=見出し（太字）, "n"=数値
+function xlsxCell(ref, value, type) {
+  if (type === "n") return `<c r="${ref}"><v>${Number(value) || 0}</v></c>`;
+  const style = type === "h" ? "2" : "1";
+  return `<c r="${ref}" t="inlineStr" s="${style}"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+}
+
+// ラベル/値ペアの明細シート。imageRef があれば末尾に描画参照を付ける
+function xlsxDetailSheet(pairs, hasDrawing) {
+  const rows = pairs.map(([label, value, type], i) => {
+    const r = i + 1;
+    return `<row r="${r}">${xlsxCell(`A${r}`, label, "h")}${xlsxCell(`B${r}`, value, type || "s")}</row>`;
+  }).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<cols><col min="1" max="1" width="16" customWidth="1"/><col min="2" max="2" width="64" customWidth="1"/></cols>
+<sheetData>${rows}</sheetData>
+${hasDrawing ? '<drawing r:id="rId1"/>' : ""}
+</worksheet>`;
+}
+
+// 一覧（目次）シート
+function xlsxSummarySheet(rows, sheetNames) {
+  const headers = ["シート", "日付", "支払先", "金額", "勘定科目", "摘要", "依頼内容・用途"];
+  const headerXml = `<row r="1">${headers.map((h, c) =>
+    xlsxCell(String.fromCharCode(65 + c) + "1", h, "h")).join("")}</row>`;
+  const bodyXml = rows.map((r, i) => {
+    const n = i + 2;
+    const cells = [
+      [sheetNames[i], "s"], [r.date, "s"], [r.vendor, "s"], [r.amount, "n"],
+      [r.category, "s"], [r.memo, "s"], [r.note ?? "", "s"],
+    ];
+    return `<row r="${n}">${cells.map(([v, t], c) =>
+      xlsxCell(String.fromCharCode(65 + c) + n, v, t)).join("")}</row>`;
+  }).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<cols><col min="1" max="1" width="20" customWidth="1"/><col min="2" max="2" width="12" customWidth="1"/><col min="3" max="3" width="22" customWidth="1"/><col min="4" max="4" width="10" customWidth="1"/><col min="5" max="5" width="10" customWidth="1"/><col min="6" max="6" width="40" customWidth="1"/><col min="7" max="7" width="30" customWidth="1"/></cols>
+<sheetData>${headerXml}${bodyXml}</sheetData>
+</worksheet>`;
+}
+
+// 写真1枚をシートに貼るdrawing XML。位置はA列・anchorRow行目から、表示サイズはpx指定
+// （EMU = px × 9525。埋め込みJPEGは1200pxでも、表示は幅440px程度に抑えて見やすくする）
+function xlsxDrawing(displayW, displayH, anchorRow) {
+  const cx = Math.round(displayW * 9525);
+  const cy = Math.round(displayH * 9525);
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<xdr:oneCellAnchor>
+<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${anchorRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+<xdr:ext cx="${cx}" cy="${cy}"/>
+<xdr:pic>
+<xdr:nvPicPr><xdr:cNvPr id="1" name="証憑画像"/><xdr:cNvPicPr/></xdr:nvPicPr>
+<xdr:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+</xdr:pic>
+<xdr:clientData/>
+</xdr:oneCellAnchor>
+</xdr:wsDr>`;
+}
+
+// 固定の最小styles.xml。s=1: 折り返し＋上寄せ（値セル）、s=2: 太字（見出しセル）
+const XLSX_STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="2"><font><sz val="11"/><name val="Yu Gothic"/></font><font><b/><sz val="11"/><name val="Yu Gothic"/></font></fonts>
+<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="3">
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+</cellXfs>
+</styleSheet>`;
+
+// rows（エクスポート対象の明細）から.xlsxのBlobを生成する
+async function buildXlsx(rows) {
+  const encoder = new TextEncoder();
+  const sheetNames = rows.map((r, i) => xlsxSheetName(r, i));
+  const entries = [];
+  const overrides = [];
+  const wbSheets = [];
+  const wbRels = [];
+
+  // シート1: 一覧（目次）
+  const sheetCount = rows.length + 1;
+  wbSheets.push(`<sheet name="一覧" sheetId="1" r:id="rId1"/>`);
+  wbRels.push(`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>`);
+  entries.push({ name: "xl/worksheets/sheet1.xml", data: encoder.encode(xlsxSummarySheet(rows, sheetNames)) });
+  overrides.push(`<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`);
+
+  // シート2以降: 明細1件につき1シート
+  let drawingCount = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const sheetNo = i + 2;
+    const pairs = [["日付", r.date || ""]];
+    if (r.date_to) pairs.push([r.category === "宿泊費" ? "宿泊終了日" : "復路の日付", r.date_to]);
+    pairs.push(["支払先", r.vendor || ""], ["金額", r.amount, "n"], ["勘定科目", r.category || ""]);
+    if (r.trip_type) pairs.push(["往復区分", r.trip_type]);
+    pairs.push(["摘要", r.memo || ""], ["依頼内容・用途", r.note || ""]);
+    if (r.split_people >= 2) {
+      pairs.push(["按分人数", r.split_people, "n"],
+        ["1人あたり請求額", Math.floor(Number(r.amount) / r.split_people), "n"]);
+    }
+    if (r.needs_review) pairs.push(["要確認", r.needs_review]);
+    pairs.push(["取込日時", formatDateTime(r.created_at)], ["元ファイル名", r.filename || ""]);
+
+    // 証憑写真: 保存済みPNGを長辺1200pxのJPEGに縮小して埋め込む
+    let drawingXml = null;
+    let imageData = null;
+    const blob = r.filename && r.filename !== "(手入力)" ? await getImage(r.id).catch(() => null) : null;
+    if (blob) {
+      const canvas = await loadCanvasFromFile(blob, 1200);
+      imageData = new Uint8Array(await (await canvasToJpegBlob(canvas, 0.85)).arrayBuffer());
+      // 表示は幅440px（約11.6cm）を上限に縦横比を保つ
+      const scale = Math.min(1, 440 / canvas.width);
+      drawingXml = xlsxDrawing(Math.round(canvas.width * scale), Math.round(canvas.height * scale), pairs.length + 1);
+    }
+
+    entries.push({ name: `xl/worksheets/sheet${sheetNo}.xml`, data: encoder.encode(xlsxDetailSheet(pairs, !!drawingXml)) });
+    overrides.push(`<Override PartName="/xl/worksheets/sheet${sheetNo}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`);
+    wbSheets.push(`<sheet name="${xmlEscape(sheetNames[i])}" sheetId="${sheetNo}" r:id="rId${sheetNo}"/>`);
+    wbRels.push(`<Relationship Id="rId${sheetNo}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${sheetNo}.xml"/>`);
+
+    if (drawingXml) {
+      drawingCount++;
+      const d = drawingCount;
+      entries.push({ name: `xl/drawings/drawing${d}.xml`, data: encoder.encode(drawingXml) });
+      entries.push({ name: `xl/media/image${d}.jpeg`, data: imageData });
+      entries.push({
+        name: `xl/worksheets/_rels/sheet${sheetNo}.xml.rels`,
+        data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing${d}.xml"/></Relationships>`),
+      });
+      entries.push({
+        name: `xl/drawings/_rels/drawing${d}.xml.rels`,
+        data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image${d}.jpeg"/></Relationships>`),
+      });
+      overrides.push(`<Override PartName="/xl/drawings/drawing${d}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>`);
+    }
+  }
+
+  // ブック定義・スタイル・パッケージ定義
+  const stylesRid = sheetCount + 1;
+  entries.push({
+    name: "xl/workbook.xml",
+    data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${wbSheets.join("")}</sheets></workbook>`),
+  });
+  entries.push({
+    name: "xl/_rels/workbook.xml.rels",
+    data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${wbRels.join("")}<Relationship Id="rId${stylesRid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`),
+  });
+  entries.push({ name: "xl/styles.xml", data: encoder.encode(XLSX_STYLES) });
+  entries.push({
+    name: "_rels/.rels",
+    data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`),
+  });
+  entries.unshift({
+    name: "[Content_Types].xml",
+    data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpeg" ContentType="image/jpeg"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${overrides.join("")}</Types>`),
+  });
+
+  const zipBlob = buildZip(entries);
+  return new Blob([zipBlob], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
 
 // OpenAI Vision APIを直接呼び出して領収書を解析する
@@ -4446,6 +4640,26 @@ document.addEventListener("DOMContentLoaded", async () => {
     } finally {
       btn.disabled = false;
       btn.textContent = "ZIPエクスポート（CSV＋証憑画像）";
+    }
+  });
+
+  // Excelエクスポート（1明細1シート＋写真）
+  $("export-xlsx-btn").addEventListener("click", async () => {
+    const { month, rows } = getExportRows();
+    if (rows.length === 0) {
+      alert("エクスポートする明細がありません。");
+      return;
+    }
+    const btn = $("export-xlsx-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Excel作成中...';
+    try {
+      downloadBlob(await buildXlsx(rows), `receipts_${month || "all"}.xlsx`);
+    } catch (err) {
+      alert("Excelの作成に失敗しました: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Excelエクスポート（1明細1シート＋写真）";
     }
   });
 

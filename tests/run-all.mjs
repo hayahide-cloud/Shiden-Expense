@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 const suites = [
   "test.mjs", "test-zip.mjs", "test-share.mjs", "test-enhance.mjs", "test-split.mjs",
   "test-tab-persist.mjs", "test-restore-form.mjs", "test-crop.mjs", "test-transit.mjs",
-  "test-screencap.mjs", "test-pdf.mjs", "test-github-sync.mjs",
+  "test-screencap.mjs", "test-pdf.mjs", "test-github-sync.mjs", "test-xlsx.mjs",
 ];
 
 let failed = 0;

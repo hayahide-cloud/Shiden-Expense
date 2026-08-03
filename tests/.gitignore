@@ -2,3 +2,4 @@ node_modules
 package-lock.json
 shots/
 split_export.csv
+export_test.xlsx
