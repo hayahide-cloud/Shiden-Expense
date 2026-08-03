@@ -181,12 +181,20 @@ await page.click("#gh-sync-btn");
 assert(await waitFor(() => repoFiles.size === 2, "手動同期での追いつき"), "復旧後: 今すぐ同期で未同期分がアップロードされる");
 await waitFor(async () => (await page.textContent("#gh-sync-status")).includes("同期済み"), "同期済み表示");
 
-// --- ケース5: 端末データを全削除してもリポジトリは残り、そこから全件復元できる ---
+// --- ケース5: 端末データ消失（機種変更相当）→ リポジトリから全件復元できる ---
+// 明細・画像・sha表を直接消して「新しい端末」を再現する（設定＝トークンだけは引き継ぐ想定）
 const putsBeforeClear = putCount;
-await page.click("#clear-btn"); // confirmは自動承諾
-await page.waitForFunction(() => JSON.parse(localStorage.getItem("shiden_expense_receipts") || "[]").length === 0);
-assert(repoFiles.size === 2, "全明細削除: リポジトリのアーカイブは削除されない");
-
+await page.evaluate(async () => {
+  localStorage.removeItem("shiden_expense_receipts");
+  localStorage.removeItem("shiden_expense_gh_sha");
+  await new Promise((resolve) => {
+    const req = indexedDB.deleteDatabase("shiden_expense");
+    req.onsuccess = req.onerror = req.onblocked = resolve;
+  });
+});
+await page.reload();
+await page.waitForLoadState("domcontentloaded");
+await page.click('nav button[data-panel="settings"]');
 await page.click("#gh-restore-btn"); // confirmは自動承諾
 await page.waitForFunction(() => JSON.parse(localStorage.getItem("shiden_expense_receipts") || "[]").length === 2, null, { timeout: 15000 });
 const restored = await page.evaluate(() => JSON.parse(localStorage.getItem("shiden_expense_receipts")));
@@ -212,6 +220,20 @@ assert(await waitFor(() => {
   return p && repoFiles.size === 2;
 }, "復元後の編集"), "復元後の編集: 元のパスが上書きされ、ファイル数は増えない");
 assert([...repoFiles.keys()].sort().join("|") === taxiPathBefore, "復元後の編集: パス構成が変わらない");
+
+// --- ケース6: 削除はミラー型 ---
+// 個別削除は既にケース3で確認済み。全明細削除でもリポジトリ側が全て消えることを確認する
+await page.click('nav button[data-panel="settings"]');
+await page.click("#clear-btn"); // confirmは自動承諾
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("shiden_expense_receipts") || "[]").length === 0);
+assert(await waitFor(() => repoFiles.size === 0, "全明細削除の同期"),
+  "全明細削除: リポジトリ側の明細も全て削除される");
+
+// 空のリポジトリから復元しても何も復活しない
+await page.click("#gh-restore-btn");
+await page.waitForFunction(() => document.getElementById("gh-restore-result").textContent.includes("復元"), null, { timeout: 15000 });
+const afterEmptyRestore = await page.evaluate(() => JSON.parse(localStorage.getItem("shiden_expense_receipts") || "[]"));
+assert(afterEmptyRestore.length === 0, "全明細削除後の復元: 削除済みの明細が復活しない");
 
 await browser.close();
 console.log(failures === 0 ? "\nALL GITHUB-SYNC TESTS PASSED" : `\n${failures} FAILURES`);

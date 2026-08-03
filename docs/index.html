@@ -977,7 +977,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-16.115 Excelの写真を原本のまま埋め込み（画質改善）";
+const APP_VERSION = "2026-07-17.116 GitHub同期をミラー型に（削除を完全連動）";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1652,8 +1652,10 @@ async function embedRowIntoImage(blob, row) {
 // 端末内(localStorage/IndexedDB)はオフラインでも使えるワーキング領域のままとし、
 // リポジトリを「端末が消えても残る正本アーカイブ」として使う設計。
 // - 保存・編集のたびに該当行のPNGを自動アップロード（失敗しても未同期として残り、後で再同期できる）
-// - 明細の個別削除は誤登録の訂正なのでリポジトリ側も削除する
-// - 「全明細を削除」は端末整理のための操作なのでリポジトリには触れない（アーカイブが残る）
+// - 削除はミラー型: 個別削除・全明細削除ともリポジトリ側も削除する
+//   （当初は全明細削除でアーカイブを残す設計だったが、「復元すると削除済みの明細まで
+//     復活する」ためオーナー要望でミラー型に変更。リポジトリ＝端末の写しであり、
+//     過去の履歴が必要な場合はgitの履歴から辿れる）
 
 function ghSettings() {
   const s = loadSettings();
@@ -1855,9 +1857,13 @@ async function ghRestoreAll(onProgress) {
   const branch = (await repoRes.json()).default_branch || "main";
   const treeRes = await ghApi(`/git/trees/${encodeURIComponent(branch)}?recursive=1`);
   if (!treeRes.ok) throw new Error(`ファイル一覧の取得に失敗しました (HTTP ${treeRes.status})`);
+  // 削除待ち（オフライン中に端末で削除済み等）のファイルは復元対象から除く
+  // （復元→削除同期の順に走ると、消したはずの明細が復活してしまうため）
+  const pendingDeletes = new Set(loadGhDeletes());
   const paths = ((await treeRes.json()).tree || [])
     .filter((t) => t.type === "blob" && t.path.startsWith(GH_FOLDER + "/") && t.path.endsWith(".png"))
-    .map((t) => t.path);
+    .map((t) => t.path)
+    .filter((p) => !pendingDeletes.has(p));
   const files = [];
   const pathByFile = new Map();
   for (let i = 0; i < paths.length; i++) {
@@ -4748,13 +4754,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // 全削除（証憑画像も含めて削除する）。エクスポート後の端末整理が目的の操作なので、
-  // GitHubリポジトリのアーカイブには触れない（個別削除とは扱いを変えている）
+  // 全削除（証憑画像も含めて削除する）。GitHub同期はミラー型:
+  // 端末で消したものはリポジトリからも消す（当初はアーカイブとして残す設計だったが、
+  // 「復元すると削除済みの明細まで復活する」ためオーナー要望でミラー型に変更）
   $("clear-btn").addEventListener("click", async () => {
-    const archiveNote = ghConfigured() ? "\nGitHubリポジトリ上のアーカイブは削除されず残ります。" : "";
-    if (!confirm("全明細と証憑画像を削除しますか？この操作は取り消せません。" + archiveNote)) return;
+    const rows = loadReceipts();
+    const syncedPaths = ghConfigured()
+      ? rows.filter((r) => r.gh_synced || r.gh_path).map((r) => rowRepoPath(r))
+      : [];
+    const ghNote = syncedPaths.length ? "\nGitHubリポジトリ上の明細もあわせて削除されます。" : "";
+    if (!confirm("全明細と証憑画像を削除しますか？この操作は取り消せません。" + ghNote)) return;
+    if (syncedPaths.length) saveGhDeletes([...loadGhDeletes(), ...syncedPaths]);
     saveReceipts([]);
     await clearImages().catch(() => {});
+    requestGhSync();
     renderList();
     alert("削除しました。");
   });
