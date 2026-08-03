@@ -103,8 +103,11 @@ const sheet3 = files.get("xl/worksheets/sheet3.xml").toString("utf8");
 assert(sheet3.includes("タクシー会社") && sheet3.includes('<drawing r:id="rId1"/>'), "明細シート: 写真ありの明細に描画参照がある");
 assert(names.includes("xl/drawings/drawing1.xml") && names.includes("xl/worksheets/_rels/sheet3.xml.rels"),
   "描画: drawing XMLとシートrelsがある");
-const media = files.get("xl/media/image1.jpeg");
-assert(media && media.length > 0 && media[0] === 0xff && media[1] === 0xd8, "画像: JPEGがxl/mediaに埋め込まれている");
+// 証憑は原本PNGのまま埋め込まれる（再圧縮しない）。保存時にCSVが埋め込まれた
+// 証憑PNGとバイト一致するかまで確認する
+const media = files.get("xl/media/image1.png");
+assert(media && media.length > 0 && media.readUInt32BE(0) === 0x89504e47, "画像: PNG原本がxl/mediaに埋め込まれている");
+assert(media.includes("ShidenExpense"), "画像: 埋め込みPNGは明細CSV入りの原本そのもの");
 
 await browser.close();
 console.log(failures === 0 ? "\nALL XLSX TESTS PASSED" : `\n${failures} FAILURES`);

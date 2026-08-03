@@ -804,7 +804,7 @@
       <p class="note">ZIPにはCSVと証憑画像（元ファイル名列で紐づく）が含まれます。CSVはUTF-8(BOM付き)。
         OneDriveに保存し、ExpenseVBAの明細シートへ取り込めます。<br>
         Excelは先頭に一覧シート、続いて明細ごとに1シート（項目＋証憑写真）が入ります。
-        写真は閲覧用に縮小されるため、原本が必要な場合はZIPを使ってください。</p>
+        写真は原本のまま埋め込まれる（画質劣化なし）ため、ファイルサイズは大きめです。</p>
     </div>
     <div class="summary">
       <span id="count-label">0件</span>
@@ -977,7 +977,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-16.114 Excelエクスポート（1明細1シート＋写真）を追加";
+const APP_VERSION = "2026-07-16.115 Excelの写真を原本のまま埋め込み（画質改善）";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1937,11 +1937,27 @@ function buildZip(entries) {
 // .xlsxの実体はZIP+XML（Office Open XML）。ZIPは自前実装(buildZip・無圧縮)を流用し、
 // ライブラリなしで生成する。先頭に「一覧」シート、続いて明細1件につき1シート
 // （文字データ＋証憑写真をdrawing XMLで貼り付け）という構成。
-// 写真は閲覧用に長辺1200pxのJPEGへ縮小して埋め込む（原本はZIP/GitHub側が持つ役割分担）
+// 写真は保存されている証憑を縮小・再圧縮せず原本のまま埋め込む（画質劣化ゼロ。
+// シート上の表示は幅440pxに抑え、拡大すれば原寸で見られる。ファイルサイズは増えるが
+// 原本性優先。当初は1200px JPEGに縮小していたが画質不足のため原本埋め込みに変更）
 
 const xmlEscape = (v) => String(v ?? "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+// 画像の原寸を読み取る（デコードのみ・再エンコードしない）
+function imageDimensions(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("画像を読み込めません")); };
+    img.src = url;
+  });
+}
 
 // シート名の制約: 31文字以内・[ ] : * ? / \ 禁止・重複不可。
 // 連番プレフィックスで一意性と並び順を保証する
@@ -2060,16 +2076,18 @@ async function buildXlsx(rows) {
     if (r.needs_review) pairs.push(["要確認", r.needs_review]);
     pairs.push(["取込日時", formatDateTime(r.created_at)], ["元ファイル名", r.filename || ""]);
 
-    // 証憑写真: 保存済みPNGを長辺1200pxのJPEGに縮小して埋め込む
+    // 証憑写真: 保存済みの原本をそのまま埋め込む（再圧縮しない）。寸法だけ読み取る
     let drawingXml = null;
     let imageData = null;
+    let imageExt = "png";
     const blob = r.filename && r.filename !== "(手入力)" ? await getImage(r.id).catch(() => null) : null;
     if (blob) {
-      const canvas = await loadCanvasFromFile(blob, 1200);
-      imageData = new Uint8Array(await (await canvasToJpegBlob(canvas, 0.85)).arrayBuffer());
-      // 表示は幅440px（約11.6cm）を上限に縦横比を保つ
-      const scale = Math.min(1, 440 / canvas.width);
-      drawingXml = xlsxDrawing(Math.round(canvas.width * scale), Math.round(canvas.height * scale), pairs.length + 1);
+      imageData = new Uint8Array(await blob.arrayBuffer());
+      imageExt = blob.type === "image/jpeg" ? "jpeg" : "png";
+      const dim = await imageDimensions(blob);
+      // 表示は幅440px（約11.6cm）を上限に縦横比を保つ（拡大すれば原寸で見られる）
+      const scale = Math.min(1, 440 / dim.width);
+      drawingXml = xlsxDrawing(Math.round(dim.width * scale), Math.round(dim.height * scale), pairs.length + 1);
     }
 
     entries.push({ name: `xl/worksheets/sheet${sheetNo}.xml`, data: encoder.encode(xlsxDetailSheet(pairs, !!drawingXml)) });
@@ -2081,7 +2099,7 @@ async function buildXlsx(rows) {
       drawingCount++;
       const d = drawingCount;
       entries.push({ name: `xl/drawings/drawing${d}.xml`, data: encoder.encode(drawingXml) });
-      entries.push({ name: `xl/media/image${d}.jpeg`, data: imageData });
+      entries.push({ name: `xl/media/image${d}.${imageExt}`, data: imageData });
       entries.push({
         name: `xl/worksheets/_rels/sheet${sheetNo}.xml.rels`,
         data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -2090,7 +2108,7 @@ async function buildXlsx(rows) {
       entries.push({
         name: `xl/drawings/_rels/drawing${d}.xml.rels`,
         data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image${d}.jpeg"/></Relationships>`),
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image${d}.${imageExt}"/></Relationships>`),
       });
       overrides.push(`<Override PartName="/xl/drawings/drawing${d}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>`);
     }
@@ -2117,7 +2135,7 @@ async function buildXlsx(rows) {
   entries.unshift({
     name: "[Content_Types].xml",
     data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpeg" ContentType="image/jpeg"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${overrides.join("")}</Types>`),
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="png" ContentType="image/png"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${overrides.join("")}</Types>`),
   });
 
   const zipBlob = buildZip(entries);
