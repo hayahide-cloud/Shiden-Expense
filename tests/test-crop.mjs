@@ -287,6 +287,18 @@ await page.waitForFunction(() => document.getElementById("restore-result").textC
 const countAfterDup = await page.evaluate(() => JSON.parse(localStorage.getItem("shiden_expense_receipts")).length);
 assert(countAfterDup === 1, "復元: 重複はスキップされ件数が増えない");
 
+// --- 取込タブの「PNG画像から復元」: 設定タブと同じ復元が取込動線からもできる ---
+await page.evaluate(() => localStorage.setItem("shiden_expense_receipts", "[]"));
+await page.click('nav button[data-panel="capture"]');
+await page.waitForSelector("#panel-capture.active");
+await page.setInputFiles("#capture-restore-input", {
+  name: "backup.png", mimeType: "image/png", buffer: Buffer.from(pngBytes),
+});
+await page.waitForFunction(() => document.getElementById("capture-message").textContent.includes("1件を復元"), { timeout: 10000 });
+const captureRestored = await page.evaluate(() => JSON.parse(localStorage.getItem("shiden_expense_receipts")));
+assert(captureRestored.length === 1 && captureRestored[0].vendor === "トリミング商店",
+  `取込タブ復元: 明細が戻る（実際: ${captureRestored.length}件）`);
+
 await page.click('nav button[data-panel="capture"]');
 await page.waitForSelector("#panel-capture.active");
 

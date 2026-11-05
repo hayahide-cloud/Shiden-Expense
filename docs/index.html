@@ -296,6 +296,9 @@
   #manual-btn { color: var(--purchase); }
   #transit-manual-btn, #screencap-btn { color: var(--transit); }
   #capture-step .section-hotel { color: var(--hotel); }
+  /* 4つ目の項目（データの取り込み）は科目の入口ではないため、控えめな無彩色にする */
+  #capture-step .section-restore { color: var(--muted); }
+  #capture-step #capture-restore-label { border-style: dashed; }
   #capture-step .file-button.hotel {
     border-color: var(--hotel);
     color: var(--hotel);
@@ -678,6 +681,18 @@
         <input type="file" id="hotel-input" accept="image/*,video/*,application/pdf">
       </label>
       <button id="hotel-manual-btn" class="ghost">手入力で追加</button>
+
+      <h2 class="section-heading section-restore">データの取り込み</h2>
+      <!-- このアプリの証憑PNGには明細CSVが埋め込まれているため、PNGを選ぶだけで
+           明細ごと取り込める。設定タブ「データの復元」と同じ機能の、日常の取込動線版
+           （アーカイブや書き出し済みPNGからの戻し入れに使う） -->
+      <label class="file-button" id="capture-restore-label">
+        🛟 PNG画像から復元
+        <input type="file" id="capture-restore-input" accept="image/png" multiple>
+      </label>
+      <p class="note" style="text-align: center;">このアプリが保存・書き出した証憑PNG
+        （ZIP・証憑画像を保存・GitHubのアーカイブ等）を選ぶと、埋め込まれた明細ごと
+        取り込みます。重複する明細は自動でスキップされます。</p>
       <div id="screencap-panel" class="hidden">
         <h2>画面キャプチャで取込</h2>
         <video id="screencap-video" autoplay muted playsinline></video>
@@ -988,7 +1003,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-11-05.118 下部ナビを画面下端いっぱいに";
+const APP_VERSION = "2026-11-05.119 取込タブに「PNG画像から復元」を追加";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -4417,8 +4432,30 @@ document.addEventListener("DOMContentLoaded", async () => {
       $("restore-result").textContent = summary;
       showToast(summary);
       updateStorageInfo();
+      requestGhSync(); // 復元した行は未同期なので、その場でリポジトリへ追いつかせる
     } catch (err) {
       $("restore-result").textContent = "復元に失敗しました: " + err.message;
+    } finally {
+      label.classList.remove("busy");
+    }
+  });
+
+  // 証憑PNGからの明細復元（取込タブ「PNG画像から復元」）。設定タブと同じ機能の取込動線版。
+  // 結果は取込タブのメッセージ欄とトーストに出す
+  $("capture-restore-input").addEventListener("change", async () => {
+    const files = Array.from($("capture-restore-input").files);
+    $("capture-restore-input").value = "";
+    if (files.length === 0) return;
+    const label = $("capture-restore-label");
+    label.classList.add("busy");
+    showMessage("", "");
+    try {
+      const summary = await restoreFromPngFiles(files);
+      showMessage("ok", summary);
+      showToast(summary);
+      requestGhSync();
+    } catch (err) {
+      showMessage("error", "復元に失敗しました: " + err.message);
     } finally {
       label.classList.remove("busy");
     }
