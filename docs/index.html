@@ -555,9 +555,10 @@
     background: rgba(11, 8, 17, 0.94);
     backdrop-filter: blur(12px);
     border-top: 1px solid var(--border);
-    /* バーをできる限り画面下端へ寄せる。ホームバー(インジケータ)用のsafe-areaは
-       ほぼ使わず、ラベルが読める最小限の余白だけ残す */
-    padding-bottom: max(0px, calc(env(safe-area-inset-bottom) - 26px));
+    /* バーを画面下端いっぱいまで寄せる。ホームバー(インジケータ)用のsafe-area
+       (iPhoneで約34px)は使わない（オーナー好みで余白ゼロ。ラベルの下端が
+       インジケータと重なって見えるが許容） */
+    padding-bottom: max(0px, calc(env(safe-area-inset-bottom) - 34px));
   }
   nav button {
     flex: 1;
@@ -987,7 +988,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-11-05.117 全明細のアーカイブ送り機能を追加";
+const APP_VERSION = "2026-11-05.118 下部ナビを画面下端いっぱいに";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
