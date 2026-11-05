@@ -14,11 +14,13 @@ function assert(cond, name) {
   else { console.error(`FAIL: ${name}`); failures++; }
 }
 
-// ===== 疑似リポジトリ（Contents API / Git Trees APIの必要最小限を実装） =====
+// ===== 疑似リポジトリ（Contents API / Git Data APIの必要最小限を実装） =====
 const repoFiles = new Map(); // path -> { sha, base64 }
 let shaCounter = 0;
 let putCount = 0;
 let apiDown = false; // trueの間は全リクエストを500で落とす（同期失敗→追いつきの検証用）
+let headCounter = 1; // 疑似ブランチの先頭コミット
+let pendingTreeOps = null; // POST git/treesで受けた移動・削除をrefs更新時に適用する
 
 function handleGh(route) {
   const req = route.request();
@@ -32,8 +34,37 @@ function handleGh(route) {
     return json(200, { default_branch: "main" });
   }
   if (pathname === `${repoRoot}/git/trees/main` && req.method() === "GET") {
-    const tree = [...repoFiles.keys()].map((p) => ({ path: p, type: "blob" }));
+    const tree = [...repoFiles.entries()].map(([p, f]) => ({ path: p, type: "blob", sha: f.sha }));
     return json(200, { tree });
+  }
+  // --- Git Data API（アーカイブ送りの1コミット移動で使う） ---
+  if (pathname === `${repoRoot}/git/refs/heads/main`) {
+    if (req.method() === "GET") return json(200, { object: { sha: `head_${headCounter}` } });
+    if (req.method() === "PATCH") {
+      // ブランチ更新＝コミット確定。溜めたツリー操作を疑似リポジトリへ適用する
+      // （実物と同じく、追加はblob shaで既存内容を参照し、sha=nullは削除）
+      if (pendingTreeOps) {
+        const bySha = new Map([...repoFiles.values()].map((f) => [f.sha, f]));
+        for (const op of pendingTreeOps.filter((o) => o.sha !== null)) {
+          const src = bySha.get(op.sha);
+          if (src) repoFiles.set(op.path, { sha: op.sha, base64: src.base64 });
+        }
+        for (const op of pendingTreeOps.filter((o) => o.sha === null)) repoFiles.delete(op.path);
+        pendingTreeOps = null;
+      }
+      headCounter++;
+      return json(200, { object: { sha: `head_${headCounter}` } });
+    }
+  }
+  if (pathname.startsWith(`${repoRoot}/git/commits/`) && req.method() === "GET") {
+    return json(200, { tree: { sha: "roottree" } });
+  }
+  if (pathname === `${repoRoot}/git/trees` && req.method() === "POST") {
+    pendingTreeOps = JSON.parse(req.postData()).tree;
+    return json(201, { sha: "newtree" });
+  }
+  if (pathname === `${repoRoot}/git/commits` && req.method() === "POST") {
+    return json(201, { sha: "newcommit" });
   }
   if (pathname.startsWith(`${repoRoot}/contents/`)) {
     const filePath = pathname.slice(`${repoRoot}/contents/`.length);
@@ -234,6 +265,37 @@ await page.click("#gh-restore-btn");
 await page.waitForFunction(() => document.getElementById("gh-restore-result").textContent.includes("復元"), null, { timeout: 15000 });
 const afterEmptyRestore = await page.evaluate(() => JSON.parse(localStorage.getItem("shiden_expense_receipts") || "[]"));
 assert(afterEmptyRestore.length === 0, "全明細削除後の復元: 削除済みの明細が復活しない");
+
+// --- ケース7: アーカイブ送り（archive/へ1コミット移動→端末は空→復元対象外） ---
+await page.click('nav button[data-panel="capture"]');
+for (const [vendor, amount] of [["アーカイブ商店A", "1000"], ["アーカイブ商店B", "2000"]]) {
+  await page.click("#manual-btn");
+  await page.fill("#f-vendor", vendor);
+  await page.fill("#f-amount", amount);
+  await page.fill("#f-date", "2026-11-01");
+  await page.selectOption("#f-category", "雑費");
+  await page.click("#save-btn");
+  await page.waitForSelector("#capture-step:not(.hidden)");
+}
+assert(await waitFor(() => repoFiles.size === 2, "アーカイブ前の同期"), "アーカイブ準備: 2件が同期される");
+const contentBefore = [...repoFiles.values()].map((f) => f.base64).sort().join("|");
+
+await page.click('nav button[data-panel="settings"]');
+await page.click("#archive-btn"); // confirmは自動承諾
+await page.waitForFunction(() =>
+  document.getElementById("archive-result").textContent.includes("移動しました"), null, { timeout: 15000 });
+assert(repoFiles.size === 2 && [...repoFiles.keys()].every((p) => p.startsWith("shiden-expense/archive/")),
+  `アーカイブ送り: 全ファイルがarchive/配下へ移動（実際: ${[...repoFiles.keys()].join(", ")}）`);
+assert([...repoFiles.values()].map((f) => f.base64).sort().join("|") === contentBefore,
+  "アーカイブ送り: ファイル内容は変わらない（再アップロードなしの移動）");
+const localAfterArchive = await page.evaluate(() => JSON.parse(localStorage.getItem("shiden_expense_receipts") || "[]"));
+assert(localAfterArchive.length === 0, "アーカイブ送り: 端末の明細は空になる");
+
+// アーカイブ済みの明細は復元の対象外
+await page.click("#gh-restore-btn");
+await page.waitForFunction(() => document.getElementById("gh-restore-result").textContent.includes("復元"), null, { timeout: 15000 });
+const afterArchiveRestore = await page.evaluate(() => JSON.parse(localStorage.getItem("shiden_expense_receipts") || "[]"));
+assert(afterArchiveRestore.length === 0, "アーカイブ送り後の復元: アーカイブの明細は復活しない");
 
 await browser.close();
 console.log(failures === 0 ? "\nALL GITHUB-SYNC TESTS PASSED" : `\n${failures} FAILURES`);

@@ -883,6 +883,15 @@
     </div>
     <div class="card">
       <h2>データ管理</h2>
+      <!-- アーカイブ送り: 月次の締め後に、明細をリポジトリのarchive/へ移動してから端末を空にする。
+           ミラー型同期（消したら消える）と「記録は残したい」を両立する明示的な操作 -->
+      <button id="archive-btn">📦 全明細をアーカイブ送り</button>
+      <p class="note">月次の締め後などに。全明細をGitHubリポジトリの <b>shiden-expense/archive/</b> へ
+        移動してから、端末の一覧を空にします。アーカイブはGitHub上に残り続けますが、
+        「リポジトリから復元」の対象外になるので、昔の明細が復活することはありません
+        （戻したい場合はGitHubからPNGをダウンロードして「証憑PNGから明細を復元」）。
+        GitHub同期の設定が必要です。</p>
+      <p class="note" id="archive-result" style="text-align: center;"></p>
       <button id="clear-btn" class="ghost">全明細を削除</button>
       <p class="note">データを整理する時に使います。この操作は取り消せません。</p>
       <!-- ストレージの使用量と永続化の状態。永続化は起動時にnavigator.storage.persist()で
@@ -964,6 +973,7 @@ const CROP_DRAFT_IMAGE_ID = "__crop_draft__"; // トリミング前の選択写�
 const GH_SHA_KEY = "shiden_expense_gh_sha";        // リポジトリ上のパス→ファイルsha（更新時に必要）
 const GH_DELETE_KEY = "shiden_expense_gh_deletes"; // 行削除時にリポジトリ側の削除を待つパスの列
 const GH_FOLDER = "shiden-expense";                // リポジトリ内の保存先フォルダ（他アプリのデータと分ける）
+const GH_ARCHIVE_FOLDER = "shiden-expense/archive"; // アーカイブ送りの移動先（復元の対象外）
 const GH_DEFAULT_REPO = "hayahide-cloud/Hayahide-Log";
 
 // 撮影の入口による勘定科目の固定（宿泊費の入口なら"宿泊費"、通常は""）。
@@ -977,7 +987,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-07-17.116 GitHub同期をミラー型に（削除を完全連動）";
+const APP_VERSION = "2026-11-05.117 全明細のアーカイブ送り機能を追加";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -1858,11 +1868,13 @@ async function ghRestoreAll(onProgress) {
   const treeRes = await ghApi(`/git/trees/${encodeURIComponent(branch)}?recursive=1`);
   if (!treeRes.ok) throw new Error(`ファイル一覧の取得に失敗しました (HTTP ${treeRes.status})`);
   // 削除待ち（オフライン中に端末で削除済み等）のファイルは復元対象から除く
-  // （復元→削除同期の順に走ると、消したはずの明細が復活してしまうため）
+  // （復元→削除同期の順に走ると、消したはずの明細が復活してしまうため）。
+  // archive/配下（アーカイブ送り済みの明細）も対象外にする
   const pendingDeletes = new Set(loadGhDeletes());
   const paths = ((await treeRes.json()).tree || [])
     .filter((t) => t.type === "blob" && t.path.startsWith(GH_FOLDER + "/") && t.path.endsWith(".png"))
     .map((t) => t.path)
+    .filter((p) => !p.startsWith(GH_ARCHIVE_FOLDER + "/"))
     .filter((p) => !pendingDeletes.has(p));
   const files = [];
   const pathByFile = new Map();
@@ -1875,6 +1887,70 @@ async function ghRestoreAll(onProgress) {
     pathByFile.set(file, paths[i]);
   }
   return restoreFromPngFiles(files, { ghPathFor: (f) => pathByFile.get(f) });
+}
+
+// ===== アーカイブ送り =====
+// 全明細の同期済みPNGを、リポジトリ内のarchive/配下へ「1コミットで」移動する。
+// Contents APIには移動が無く、1件ずつ再アップロードすると枚数×数MBの通信になるため、
+// Git Data APIで既存blobのsha（ファイル内容の識別子）を新パスに割り当てた新しいツリーを
+// 作ってコミットする。内容の再アップロードは発生しない。
+// 戻り値は移動した旧パスの配列（呼び出し側でsha表の掃除に使う）
+async function ghArchiveAll(rows) {
+  const repoRes = await ghApi("");
+  if (!repoRes.ok) throw new Error(`リポジトリにアクセスできません (HTTP ${repoRes.status})`);
+  const branch = (await repoRes.json()).default_branch || "main";
+
+  // 現在の先頭コミットと、そのルートツリーを取得する
+  const refRes = await ghApi(`/git/refs/heads/${encodeURIComponent(branch)}`);
+  if (!refRes.ok) throw new Error(`ブランチ情報の取得に失敗しました (HTTP ${refRes.status})`);
+  const headSha = (await refRes.json()).object.sha;
+  const headCommitRes = await ghApi(`/git/commits/${headSha}`);
+  if (!headCommitRes.ok) throw new Error(`コミット情報の取得に失敗しました (HTTP ${headCommitRes.status})`);
+  const baseTreeSha = (await headCommitRes.json()).tree.sha;
+
+  // 各明細のリポジトリ上のファイルとblob shaを特定する
+  const treeRes = await ghApi(`/git/trees/${encodeURIComponent(branch)}?recursive=1`);
+  if (!treeRes.ok) throw new Error(`ファイル一覧の取得に失敗しました (HTTP ${treeRes.status})`);
+  const blobShaByPath = new Map(((await treeRes.json()).tree || [])
+    .filter((t) => t.type === "blob").map((t) => [t.path, t.sha]));
+
+  const treeOps = [];
+  const movedPaths = [];
+  for (const row of rows) {
+    const path = rowRepoPath(row);
+    const blobSha = blobShaByPath.get(path);
+    if (!blobSha) continue; // リポジトリに無い（GitHub上で直接消された等）→ 移動するものがない
+    const archivePath = GH_ARCHIVE_FOLDER + path.slice(GH_FOLDER.length);
+    treeOps.push({ path: archivePath, mode: "100644", type: "blob", sha: blobSha }); // 新パスに同じ内容
+    treeOps.push({ path, mode: "100644", type: "blob", sha: null });                 // 旧パスは削除
+    movedPaths.push(path);
+  }
+  if (treeOps.length === 0) return movedPaths;
+
+  const newTreeRes = await ghApi("/git/trees", {
+    method: "POST",
+    body: JSON.stringify({ base_tree: baseTreeSha, tree: treeOps }),
+  });
+  if (!newTreeRes.ok) throw new Error(`ツリーの作成に失敗しました (HTTP ${newTreeRes.status})`);
+  const newTreeSha = (await newTreeRes.json()).sha;
+
+  const commitRes = await ghApi("/git/commits", {
+    method: "POST",
+    body: JSON.stringify({
+      message: `全明細をアーカイブへ移動 (${movedPaths.length}件)`,
+      tree: newTreeSha,
+      parents: [headSha],
+    }),
+  });
+  if (!commitRes.ok) throw new Error(`コミットの作成に失敗しました (HTTP ${commitRes.status})`);
+  const newCommitSha = (await commitRes.json()).sha;
+
+  const patchRes = await ghApi(`/git/refs/heads/${encodeURIComponent(branch)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ sha: newCommitSha }),
+  });
+  if (!patchRes.ok) throw new Error(`ブランチの更新に失敗しました (HTTP ${patchRes.status})`);
+  return movedPaths;
 }
 
 // entries: [{ name: string, data: Uint8Array }] からZIPのBlobを生成する
@@ -4749,6 +4825,52 @@ document.addEventListener("DOMContentLoaded", async () => {
       updateGhSyncStatus();
     } catch (err) {
       result.textContent = "復元に失敗しました: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // アーカイブ送り: 全明細をリポジトリのarchive/へ移動してから端末を空にする。
+  // データを失わないことが最優先なので、①未同期分を同期しきってから、
+  // ②リポジトリ上の移動が成功した場合のみ、③端末を空にする、の順で進める
+  $("archive-btn").addEventListener("click", async () => {
+    const result = $("archive-result");
+    if (loadReceipts().length === 0) {
+      alert("アーカイブする明細がありません。");
+      return;
+    }
+    if (!ghConfigured()) {
+      alert("アーカイブ送りにはGitHub同期の設定が必要です。設定タブの「GitHub同期」でトークンを保存してください。");
+      return;
+    }
+    if (!confirm(`全${loadReceipts().length}件の明細をアーカイブへ移動しますか？\n` +
+      "GitHubリポジトリのshiden-expense/archive/へ移動し、端末の一覧は空になります。\n" +
+      "アーカイブはGitHub上に残り続けますが、「リポジトリから復元」の対象外になります。")) return;
+    const btn = $("archive-btn");
+    btn.disabled = true;
+    try {
+      // まず未同期分（アップロード待ち・削除待ち）を片付けて、リポジトリを端末と一致させる
+      result.textContent = "未同期分を同期中…";
+      while (ghSyncRunning) await new Promise((r) => setTimeout(r, 200));
+      await processGhSync(false);
+      const rows = loadReceipts();
+      if (rows.some((r) => !r.gh_synced) || loadGhDeletes().length > 0) {
+        throw new Error("未同期の明細が残っています。通信環境の良い場所で「今すぐ同期」を済ませてから再度お試しください。");
+      }
+      result.textContent = "アーカイブへ移動中…";
+      const movedPaths = await ghArchiveAll(rows);
+      // リポジトリ側の移動が確定したので端末を空にする
+      saveReceipts([]);
+      await clearImages().catch(() => {});
+      const shaMap = loadGhShaMap();
+      for (const p of movedPaths) delete shaMap[p];
+      saveGhShaMap(shaMap);
+      renderList();
+      updateGhSyncStatus();
+      result.textContent = `${movedPaths.length}件をアーカイブへ移動しました。`;
+    } catch (err) {
+      result.textContent = "";
+      alert("アーカイブ送りに失敗しました: " + err.message + "\n明細は端末に残っています。");
     } finally {
       btn.disabled = false;
     }
