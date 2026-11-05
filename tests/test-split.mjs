@@ -125,15 +125,11 @@ assert(shareBody?.includes("按分: 5人で ¥5,944/人"), `申請: 本文に按
 
 await page.click("#cancel-btn");
 
-// CSVエクスポートに按分人数・1人あたり請求額の列が出力される
+// CSVに按分人数・1人あたり請求額の列が出力される
+// （CSVのみエクスポートボタンは廃止。ZIP・PNG埋め込みで使う共有関数buildCsvを直接検証）
 await page.click('nav button[data-panel="list"]');
-const downloadPromise = page.waitForEvent("download");
-await page.evaluate(() => document.getElementById("export-btn").click());
-const download = await downloadPromise;
-const csvPath = new URL("./split_export.csv", import.meta.url).pathname;
-await download.saveAs(csvPath);
-const fs = await import("node:fs");
-const csvText = fs.readFileSync(csvPath, "utf-8");
+const csvText = await page.evaluate(() =>
+  buildCsv(JSON.parse(localStorage.getItem("shiden_expense_receipts"))));
 assert(csvText.includes("按分人数,1人あたり請求額"), "CSV: 按分の列がヘッダーに出力される");
 const dataLine = csvText.split("\r\n").find((line) => line.includes("居酒屋たぬき"));
 // 末尾は宿泊終了日列（宿泊費以外は空欄）

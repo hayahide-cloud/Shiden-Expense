@@ -814,13 +814,15 @@
       <label>対象月
         <input type="month" id="month-filter">
       </label>
-      <button id="export-zip-btn">ZIPエクスポート（CSV＋証憑画像）</button>
-      <button id="export-xlsx-btn" class="ghost">Excelエクスポート（1明細1シート＋写真）</button>
-      <button id="export-btn" class="ghost">CSVのみエクスポート</button>
-      <p class="note">ZIPにはCSVと証憑画像（元ファイル名列で紐づく）が含まれます。CSVはUTF-8(BOM付き)。
-        OneDriveに保存し、ExpenseVBAの明細シートへ取り込めます。<br>
-        Excelは先頭に一覧シート、続いて明細ごとに1シート（項目＋証憑写真）が入ります。
-        写真は原本のまま埋め込まれる（画質劣化なし）ため、ファイルサイズは大きめです。</p>
+      <!-- エクスポートのメインはExcel（1明細1シート＋写真）。ZIPはExpenseVBAへの
+           CSV取込・原本一括書き出し用の補助。CSVのみは使われなくなったため廃止
+           （CSV生成自体はZIP内とPNG埋め込みで現役） -->
+      <button id="export-xlsx-btn">Excelエクスポート（1明細1シート＋写真）</button>
+      <button id="export-zip-btn" class="ghost">ZIPエクスポート（CSV＋証憑画像）</button>
+      <p class="note">Excelは先頭に一覧シート、続いて明細ごとに1シート（項目＋証憑写真）が入ります。
+        写真は原本のまま埋め込まれる（画質劣化なし）ため、ファイルサイズは大きめです。<br>
+        ZIPはCSV（UTF-8 BOM付き）＋証憑画像の一括書き出しで、ExpenseVBAの明細シートへの
+        取込に使えます。</p>
     </div>
     <div class="summary">
       <span id="count-label">0件</span>
@@ -1003,7 +1005,7 @@ function setReceiptCategoryPreset(v) {
 }
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-11-05.119 取込タブに「PNG画像から復元」を追加";
+const APP_VERSION = "2026-11-05.120 エクスポートをExcelメインに整理（CSVのみ廃止）";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
 const PROMPT = [
@@ -4734,17 +4736,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
     return { month, rows };
   }
-
-  // CSVのみエクスポート
-  $("export-btn").addEventListener("click", () => {
-    const { month, rows } = getExportRows();
-    if (rows.length === 0) {
-      alert("エクスポートする明細がありません。");
-      return;
-    }
-    const blob = new Blob([buildCsv(rows)], { type: "text/csv;charset=utf-8" });
-    downloadBlob(blob, `receipts_${month || "all"}.csv`);
-  });
 
   // ZIPエクスポート（CSV + 証憑画像）
   $("export-zip-btn").addEventListener("click", async () => {

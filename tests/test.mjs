@@ -128,15 +128,13 @@ await page.dispatchEvent("#month-filter", "change");
 const filtered = await page.locator(".receipt-item").count();
 assert(filtered === 1, `月フィルタ: 2026-07で1件（実際: ${filtered}件）`);
 
-// CSVダウンロード
+// CSV生成（CSVのみエクスポートボタンは廃止。ZIP・PNG埋め込みで使う共有関数buildCsvを直接検証）
 await page.fill("#month-filter", "", { force: true });
 await page.dispatchEvent("#month-filter", "change");
-// display:noneの要素はforce:trueでもクリック座標を計算できずエラーになるため、
-// ページ内で直接click()を呼ぶ
-const downloadPromise = page.waitForEvent("download");
-await page.evaluate(() => document.getElementById("export-btn").click());
-const download = await downloadPromise;
-assert(download.suggestedFilename() === "receipts_all.csv", `CSV: ファイル名（実際: ${download.suggestedFilename()}）`);
+const csvHead = await page.evaluate(() =>
+  buildCsv(JSON.parse(localStorage.getItem("shiden_expense_receipts"))).split("\r\n")[0]);
+assert(csvHead.includes("取込日時,領収書日付,支払先,金額,勘定科目,摘要,元ファイル名,要確認"),
+  `CSV: ヘッダー列（実際: ${csvHead}）`);
 
 // 設定タブ
 await page.click('nav button[data-panel="settings"]');
