@@ -66,7 +66,7 @@ assert(panelHiddenAfterReopen === 1, "按分: 開き直すとパネルも閉じ�
 // 1人のまま保存すると按分は記録されない（通常の明細になる）
 await page.fill("#f-vendor", "一人メシ食堂");
 await page.fill("#f-amount", "1200");
-await page.selectOption("#f-category", "会議費");
+await page.selectOption("#f-category", "本部会議費");
 await page.click("#split-toggle-btn"); // パネルを開く（既定値1のまま）
 await page.click("#save-btn");
 await page.waitForSelector("#capture-step:not(.hidden)");

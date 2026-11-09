@@ -200,7 +200,7 @@ await page.click('nav button[data-panel="capture"]');
 await page.click("#manual-btn");
 await page.fill("#f-vendor", "障害中商店");
 await page.fill("#f-amount", "500");
-await page.selectOption("#f-category", "消耗品費");
+await page.selectOption("#f-category", "事務用消耗品費");
 await page.click("#save-btn");
 await page.waitForSelector("#capture-step:not(.hidden)");
 await page.click('nav button[data-panel="settings"]');

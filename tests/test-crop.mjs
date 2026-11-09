@@ -194,6 +194,8 @@ await page.evaluate(() => {
 });
 await page.click("#analyze-btn");
 await page.waitForSelector("#form-step:not(.hidden)", { timeout: 10000 });
+// 科目はOCRで自動設定されなくなったため、利用者として選択してから保存する
+await page.selectOption("#f-category", "本部会議費");
 assert((await page.inputValue("#f-vendor")) === "トリミング商店", "解析: トリミング後の画像でOCRが実行される");
 
 const croppedDims = await page.evaluate(async () => {
@@ -276,7 +278,7 @@ const restoredRow = await page.evaluate(async () => {
   const csv = blob ? await extractCsvFromPng(blob) : null;
   return { count: rows.length, vendor: r.vendor, amount: r.amount, category: r.category, hasImage: !!blob, embedded: !!csv, filename: r.filename };
 });
-assert(restoredRow.count === 1 && restoredRow.vendor === "トリミング商店" && restoredRow.amount === 2500 && restoredRow.category === "会議費",
+assert(restoredRow.count === 1 && restoredRow.vendor === "トリミング商店" && restoredRow.amount === 2500 && restoredRow.category === "本部会議費",
   `復元: 明細の各項目が戻る（実際: ${JSON.stringify(restoredRow)}）`);
 assert(restoredRow.hasImage && restoredRow.embedded, "復元: 証憑画像も埋め込み付きで戻る");
 // 同じPNGをもう一度選ぶと重複としてスキップされ、件数は増えない

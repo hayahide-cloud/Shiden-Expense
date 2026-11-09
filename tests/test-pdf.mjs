@@ -58,8 +58,8 @@ await page.waitForSelector("#form-step:not(.hidden)", { timeout: 20000 });
 const croppedDuringPdf = await page.evaluate(() => document.body.classList.contains("crop-fullscreen"));
 assert(!croppedDuringPdf, "PDF: トリミングエディタを経由せず直接フォームが開く");
 assert(receivedPrompt.includes("店舗レシートまたは領収書"), "PDF: レシートOCRプロンプトで解析される");
-assert((await page.inputValue("#f-category")) === "宿泊費",
-  `PDF: 宿泊費の入口からは科目が宿泊費に固定される（実際: ${await page.inputValue("#f-category")}）`);
+assert(await page.locator("#date-to-wrap:not(.hidden)").count() === 1,
+  "PDF: 宿泊費の入口からは宿泊フロー（宿泊終了日欄あり）で開く");
 assert((await page.inputValue("#f-amount")) === "13,200", "PDF: 金額が自動入力される");
 assert((await page.inputValue("#f-vendor")) === "楽天トラベル（ホテルグランヴィア広島）", "PDF: 支払先が自動入力される");
 assert((await page.inputValue("#f-date")) === "2026-07-09", "PDF: 日付（チェックイン日）が入る");
@@ -83,18 +83,18 @@ const savedPdfRow = await page.evaluate(async () => {
   const rows = JSON.parse(localStorage.getItem("shiden_expense_receipts"));
   const r = rows.find((x) => x.note === "PDFテスト");
   const blob = await getImage(r.id).catch(() => null);
-  return { filename: r.filename, category: r.category, date_to: r.date_to, hasImage: !!blob, type: blob ? blob.type : "" };
+  return { filename: r.filename, category: r.category, kind: r.kind, date_to: r.date_to, hasImage: !!blob, type: blob ? blob.type : "" };
 });
 assert(savedPdfRow.filename.endsWith(".png") && savedPdfRow.hasImage && savedPdfRow.type === "image/png",
   `PDF: 保存で証憑画像（PNG）が添付される（実際: ${savedPdfRow.filename} / ${savedPdfRow.type}）`);
-assert(savedPdfRow.category === "宿泊費" && savedPdfRow.date_to === "2026-07-10", "PDF: 科目・宿泊終了日が保存される");
+assert(savedPdfRow.kind === "hotel" && savedPdfRow.date_to === "2026-07-10", "PDF: 種別（宿泊）・宿泊終了日が保存される");
 
-// --- 購入費の入口からPDF: 科目はOCRの判定（モックは会議費）が使われる ---
+// --- 購入費の入口からPDF: 科目はOCRで自動設定されない（組合科目は判定不能・利用者が選択） ---
 await page.setInputFiles("#image-input", {
   name: "receipt.pdf", mimeType: "application/pdf", buffer: pdfBuffer,
 });
 await page.waitForSelector("#form-step:not(.hidden)", { timeout: 20000 });
-assert((await page.inputValue("#f-category")) === "会議費",
+assert((await page.inputValue("#f-category")) === "",
   `PDF: 購入費の入口では科目はOCRの判定になる（実際: ${await page.inputValue("#f-category")}）`);
 await page.click("#cancel-btn");
 await page.waitForSelector("#capture-step:not(.hidden)");

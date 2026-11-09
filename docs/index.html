@@ -971,8 +971,17 @@
 "use strict";
 
 // ===== 定数（ExpenseVBA・フル構成版と同一のスキーマ・文言を維持する） =====
-// 宿泊費は取込タブの「宿泊費の精算」導入に伴い追加（ExpenseVBA側の科目リストにも追加が必要）
-const CATEGORIES = ["交通費", "会議費", "消耗品費", "交際費", "通信費", "宿泊費", "雑費"];
+// 勘定科目: 組合会計の支出科目一覧（2026-11にオーナー指定で差し替え。旧: 交通費等の汎用7科目）。
+// 科目は取込フロー（往復区分・宿泊終了日・色分け）から独立しており、フローはkind（種別）が担う。
+// ※ExpenseVBA（Excel側）の科目リストも合わせる場合は別途更新が必要
+const CATEGORIES = [
+  "定期大会", "中央委員会", "支部代議員大会", "支部委員長会議", "労使協議会",
+  "春闘交渉委員会", "海外専門委員会", "職場環境委員会", "本部会議費", "本部業務費",
+  "JEC石油部会等", "定期大会議案書説明会", "春闘方針案説明会", "新入組合員研修会",
+  "若年層研修会", "外部セミナー参加費", "男女共同参画セミナー", "宣伝活動費", "メーデー",
+  "その他説明会", "会計監査", "支部執行委員会", "渉外関係", "業務費", "専門部会",
+  "交際費", "雑費", "事務用消耗品費", "器具備品費", "通信費", "図書費", "修繕費",
+];
 const SOURCE_MARKER = "(Shiden取込)";
 // 1〜8列目はExpenseVBAの明細シートと同一。9列目の備考は整理用メモ、10〜11列目は按分計算の
 // 記録（いずれも末尾追加なので取込互換を壊さない）
@@ -994,20 +1003,36 @@ const GH_FOLDER = "shiden-expense";                // リポジトリ内の保�
 const GH_ARCHIVE_FOLDER = "shiden-expense/archive"; // アーカイブ送りの移動先（復元の対象外）
 const GH_DEFAULT_REPO = "hayahide-cloud/Hayahide-Log";
 
-// 撮影の入口による勘定科目の固定（宿泊費の入口なら"宿泊費"、通常は""）。
-// トリミング中にリロードされても入口の種別を忘れないようlocalStorageにも持つ
+// 撮影の入口による種別(kind)の固定（"transit"=交通費フロー、"hotel"=宿泊フロー、""=購入費・立替費）。
+// かつては勘定科目そのものを固定していたが、科目を組合会計の支出科目一覧へ差し替えた際に
+// 「科目」と「取込フロー」を分離した。トリミング中にリロードされても忘れないようlocalStorageにも持つ
 const CAPTURE_CATEGORY_KEY = "shiden_expense_capture_category";
-let receiptCategoryPreset = localStorage.getItem(CAPTURE_CATEGORY_KEY) || "";
-function setReceiptCategoryPreset(v) {
-  receiptCategoryPreset = v;
+const LEGACY_KIND_MAP = { "交通費": "transit", "宿泊費": "hotel" };
+let captureKindPreset = localStorage.getItem(CAPTURE_CATEGORY_KEY) || "";
+captureKindPreset = LEGACY_KIND_MAP[captureKindPreset] ?? captureKindPreset; // 旧形式（科目名）の持ち越しに対応
+function setCaptureKindPreset(v) {
+  captureKindPreset = v;
   if (v) localStorage.setItem(CAPTURE_CATEGORY_KEY, v);
   else localStorage.removeItem(CAPTURE_CATEGORY_KEY);
 }
+
+// 行の種別（purchase / transit / hotel）。入口で決まり、保存時にkindとして行へ記録される。
+// kindを持たない行（科目分離前の旧データ・PNG復元の行）は手掛かりから推定する
+function rowKind(r) {
+  if (r.kind) return r.kind;
+  if (r.category === "交通費" || r.trip_type || r.img_kind === "route") return "transit";
+  if (r.category === "宿泊費" || r.date_to) return "hotel";
+  return "purchase";
+}
+
+// 編集フォームに表示中の明細の種別（openFormで設定。往復区分・宿泊終了日欄の表示を決める）
+let formKind = "purchase";
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-11-05.120 エクスポートをExcelメインに整理（CSVのみ廃止）";
+const APP_VERSION = "2026-11-09.121 勘定科目を組合会計の支出科目一覧に差し替え";
 
-// OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)と同一文言。抽出品質を揃えるため変更時は両方を同期すること
+// OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)がベース。科目の自動判定は、科目を組合会計の
+// 支出科目一覧（定期大会等、レシートからは判定不能）へ差し替えた際に廃止した（利用者が選択する）
 const PROMPT = [
   "あなたは経理担当者向けの経費精算アシスタントです。添付画像は日本の店舗レシートまたは領収書です。",
   "画像内の文字を1文字ずつ正確に読み取ってください。手書き文字・印影・かすれた文字は、推測でそれらしい値を作らず、",
@@ -1017,9 +1042,8 @@ const PROMPT = [
   "date_to: 宿泊の領収書で宿泊期間（チェックイン〜チェックアウト）が記載されている場合のみ、チェックアウト日をYYYY-MM-DD形式。それ以外は空文字",
   "vendor: 発行元の店舗名・会社名（手書きの宛名「様」宛先ではなく、レシート発行元を優先する）",
   "amount: 「合計」「ご請求金額」等と明記された税込合計金額（数値のみ、カンマ・円記号なし）。小計や内訳の金額と混同しない",
-  "category: 次のいずれか1つ（交通費、会議費、消耗品費、交際費、通信費、宿泊費、雑費）。摘要から最も近いものを選ぶ",
   "memo: 購入品目・利用目的の要約（20文字以内）",
-  "読み取れない項目は date と vendor と category は空文字、amount は 0 にしてください。",
+  "読み取れない項目は date と vendor は空文字、amount は 0 にしてください。",
 ].join("\n");
 
 // 交通費用OCRプロンプト: Googleマップ等の経路検索アプリのスクリーンショットから運賃を読み取る
@@ -2165,7 +2189,7 @@ async function buildXlsx(rows) {
     const r = rows[i];
     const sheetNo = i + 2;
     const pairs = [["日付", r.date || ""]];
-    if (r.date_to) pairs.push([r.category === "宿泊費" ? "宿泊終了日" : "復路の日付", r.date_to]);
+    if (r.date_to) pairs.push([rowKind(r) === "hotel" ? "宿泊終了日" : "復路の日付", r.date_to]);
     pairs.push(["支払先", r.vendor || ""], ["金額", r.amount, "n"], ["勘定科目", r.category || ""]);
     if (r.trip_type) pairs.push(["往復区分", r.trip_type]);
     pairs.push(["摘要", r.memo || ""], ["依頼内容・用途", r.note || ""]);
@@ -2288,7 +2312,7 @@ async function analyzeImage(dataUrl) {
     date_to: String(extracted.date_to ?? ""), // 宿泊期間の終了日（宿泊領収書のみ）
     vendor: String(extracted.vendor ?? ""),
     amount: parseInt(extracted.amount, 10) || 0,
-    category: CATEGORIES.includes(extracted.category) ? extracted.category : "",
+    category: "", // 科目は組合会計の支出科目のためOCRでは判定しない（利用者が選択する）
     memo: String(extracted.memo ?? ""),
   };
 }
@@ -2325,7 +2349,8 @@ async function analyzeTransitImage(dataUrls, opts = {}) {
     date: String(extracted.date ?? "") || opts.defaultDate || "",
     vendor: String(extracted.line ?? "").trim(),
     amount: parseInt(extracted.amount, 10) || 0,
-    category: "交通費",
+    category: "", // 科目は利用者が選択する（種別=交通費フローはkindで表す）
+    kind: "transit",
     memo: memoLines.join("\n"),
     note: "",
   };
@@ -3099,19 +3124,14 @@ async function pdfToCanvas(file) {
 // OCR結果を編集中フォームへ反映する（再解析・写真の後付けで共通）。
 // 依頼内容・用途と按分人数は利用者の記入のため上書きせず、
 // 読み取れなかった項目（空・0）は現在の値を据え置く。
-// 宿泊費の明細はOCRの科目判定では科目を変えない（入口で種別確定のため）
+// 勘定科目は組合会計の支出科目（定期大会等）のためOCRでは判定できず、利用者の選択を常に維持する
 function applyAnalysisToForm(result) {
-  const curCategory = $("f-category").value;
   $("f-date").value = result.date || $("f-date").value;
   $("f-vendor").value = result.vendor || $("f-vendor").value;
   if (result.amount) $("f-amount").value = formatAmountForInput(result.amount);
-  // 交通費・宿泊費の明細は入口で種別が確定しているため、OCRの科目判定では変えない
-  if (result.category && curCategory !== "宿泊費" && curCategory !== "交通費") {
-    $("f-category").value = result.category;
-  }
   updateCategoryFields();
-  // 宿泊終了日は宿泊費の明細でOCRが期間を読み取れた場合のみ反映
-  if (result.date_to && $("f-category").value === "宿泊費") $("f-date-to").value = result.date_to;
+  // 宿泊終了日は宿泊フローの明細でOCRが期間を読み取れた場合のみ反映
+  if (result.date_to && formKind === "hotel") $("f-date-to").value = result.date_to;
   $("f-memo").value = result.memo || $("f-memo").value;
   const review = computeNeedsReview(
     $("f-date").value,
@@ -3133,20 +3153,21 @@ function attachEditPreview(blob) {
   showEditPreview();
 }
 
-// 勘定科目に連動する欄の表示切り替え。
-// 2つ目の日付欄は「宿泊費（宿泊終了日）」と「交通費で往復（復路の日付）」のときだけ表示する
+// 種別(kind)に連動する欄の表示切り替え（科目とは独立。入口で決まる）。
+// 2つ目の日付欄は「宿泊フロー（宿泊終了日）」と「交通費フローで往復（復路の日付）」のときだけ表示する
 function updateCategoryFields() {
-  const cat = $("f-category").value;
-  const showForHotel = cat === "宿泊費";
-  const showForRoundTrip = cat === "交通費" && $("f-trip-type").value === "往復";
+  const showForHotel = formKind === "hotel";
+  const showForRoundTrip = formKind === "transit" && $("f-trip-type").value === "往復";
   $("date-to-wrap").classList.toggle("hidden", !showForHotel && !showForRoundTrip);
   $("date-to-label").textContent = showForRoundTrip
     ? "復路の日付（任意）"
     : "宿泊終了日（任意・チェックアウト日）";
-  $("trip-type-wrap").classList.toggle("hidden", cat !== "交通費");
+  $("trip-type-wrap").classList.toggle("hidden", formKind !== "transit");
 }
 
 function openForm(data, title) {
+  // 種別はデータが持つ値を使い、無ければ（旧データ・下書き等）手掛かりから推定する
+  formKind = data.kind || rowKind(data);
   $("form-title").textContent = title ?? "内容を確認・修正";
   // 削除・申請ボタンは既存明細の編集時のみ表示する（新規撮影・手入力では表示しない。
   // 画像保存はstartEdit()側で画像の有無を確認した後に表示切り替えする）
@@ -3158,6 +3179,12 @@ function openForm(data, title) {
   $("f-trip-type").value = data.trip_type ?? "";
   $("f-vendor").value = data.vendor;
   $("f-amount").value = formatAmountForInput(data.amount);
+  // 旧科目リスト時代の明細（交通費等）が編集で値を失わないよう、無い科目は選択肢へ足す
+  if (data.category && ![...$("f-category").options].some((o) => o.value === data.category)) {
+    const legacyOpt = document.createElement("option");
+    legacyOpt.value = legacyOpt.textContent = data.category;
+    $("f-category").appendChild(legacyOpt);
+  }
   $("f-category").value = data.category;
   updateCategoryFields();
   $("f-memo").value = data.memo;
@@ -3281,7 +3308,7 @@ function closeForm() {
   $("image-input").value = "";
   $("hotel-input").value = "";
   $("transit-photo-input").value = "";
-  setReceiptCategoryPreset("");
+  setCaptureKindPreset("");
   resetCropEditor();
   currentImage = null;
   editingId = null;
@@ -3299,6 +3326,7 @@ function saveDraft() {
     date: $("f-date").value,
     date_to: $("f-date-to").value,
     trip_type: $("f-trip-type").value,
+    kind: formKind,
     imageKind: currentImageKind,
     vendor: $("f-vendor").value,
     amount: $("f-amount").value,
@@ -3344,7 +3372,7 @@ async function restoreDraftIfAny() {
   }
   editingId = null;
   openForm({
-    date: draft.date, date_to: draft.date_to, trip_type: draft.trip_type, vendor: draft.vendor, amount: parseAmountInput(draft.amount),
+    date: draft.date, date_to: draft.date_to, trip_type: draft.trip_type, kind: draft.kind, vendor: draft.vendor, amount: parseAmountInput(draft.amount),
     category: draft.category, memo: draft.memo, note: draft.note,
   });
   showPanel("capture");
@@ -3409,9 +3437,10 @@ function getFormReceipt() {
   return {
     id: editingId,
     date: $("f-date").value,
-    trip_type: $("f-category").value === "交通費" ? $("f-trip-type").value : "",
-    date_to: $("f-category").value === "宿泊費" ||
-      ($("f-category").value === "交通費" && $("f-trip-type").value === "往復")
+    kind: formKind,
+    trip_type: formKind === "transit" ? $("f-trip-type").value : "",
+    date_to: formKind === "hotel" ||
+      (formKind === "transit" && $("f-trip-type").value === "往復")
       ? $("f-date-to").value : "",
     vendor: $("f-vendor").value.trim(),
     amount: parseAmountInput($("f-amount").value),
@@ -3448,10 +3477,10 @@ function renderList() {
   const list = $("receipt-list");
   list.innerHTML = "";
   for (const r of rows) {
-    // 種別（購入費・立替費／交通費／宿泊費）が一覧で見分けられるよう、勘定科目に応じて
-    // 色帯・バッジを切り替える（取込タブの大項目と対応。交通費=ティール、宿泊費=ローズ）
-    const isTransit = r.category === "交通費";
-    const isHotel = r.category === "宿泊費";
+    // 種別（購入費・立替費／交通費／宿泊費）が一覧で見分けられるよう、kind（入口の種別）に
+    // 応じて色帯・バッジを切り替える（取込タブの大項目と対応。交通費=ティール、宿泊費=ローズ）
+    const isTransit = rowKind(r) === "transit";
+    const isHotel = rowKind(r) === "hotel";
     const item = document.createElement("div");
     item.className = "receipt-item" + (isTransit ? " transit" : isHotel ? " hotel" : "");
     // 行全体をタップすると編集画面を開く。申請/画像保存ボタンは各自でstopPropagationし、
@@ -3577,7 +3606,11 @@ document.addEventListener("gesturestart", (e) => e.preventDefault());
 document.addEventListener("gesturechange", (e) => e.preventDefault());
 
 document.addEventListener("DOMContentLoaded", async () => {
-  // 勘定科目セレクトを構築
+  // 勘定科目セレクトを構築（先頭は未選択。科目はOCRで自動判定できないため利用者が選ぶ）
+  const emptyOpt = document.createElement("option");
+  emptyOpt.value = "";
+  emptyOpt.textContent = "（科目を選択）";
+  $("f-category").appendChild(emptyOpt);
   for (const c of CATEGORIES) {
     const opt = document.createElement("option");
     opt.value = c;
@@ -3623,16 +3656,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 画像選択（iOSの選択シートの並びをvideo/*も動画も選択できるようにしているが、
   // OCR解析は画像のみ対応のため動画が選ばれた場合はここで弾く）。
   // 選択した画像はトリミングエディタに表示し、四隅を背景検出の結果に合わせて初期配置する。
-  // 購入費・立替費と宿泊費で撮影フローは共通。宿泊費の入口から取り込んだ場合だけ、
-  // 解析後の勘定科目を宿泊費に固定する（categoryPresetで指定。リロードにも耐えるよう永続化）
-  async function onReceiptFileChosen(input, categoryPreset) {
+  // 購入費・立替費と宿泊費で撮影フローは共通。入口が種別(kind)を決める
+  // （kindPresetで指定。リロードにも耐えるよう永続化。科目は固定しない）
+  async function onReceiptFileChosen(input, kindPreset) {
     const file = input.files[0];
     if (!file) return;
     // PDFの領収書（楽天トラベル等）: 画像化して直接OCRへ。デジタル文書のため
     // 傾き・影の補正（トリミングエディタ）は不要
     if (file.type === "application/pdf") {
       input.value = "";
-      await handlePdfChosen(file, categoryPreset, input.closest("label"));
+      await handlePdfChosen(file, kindPreset, input.closest("label"));
       return;
     }
     if (!file.type.startsWith("image/")) {
@@ -3641,13 +3674,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       showMessage("error", "動画は取り込めません。写真またはPDFを選択してください。");
       return;
     }
-    setReceiptCategoryPreset(categoryPreset);
+    setCaptureKindPreset(kindPreset);
     await openCropForFile(file);
   }
 
   // PDF領収書の取込: 画像化→レシートOCR→フォーム反映。証憑はJPEGで保存する
   // （新規取込と、編集中の「写真を追加して解析」の両方から使う）
-  async function handlePdfChosen(file, categoryPreset, labelEl) {
+  async function handlePdfChosen(file, kindPreset, labelEl) {
     if (labelEl) labelEl.classList.add("busy");
     try {
       const canvas = await pdfToCanvas(file);
@@ -3657,7 +3690,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const dataUrls = [];
       for (const c of slices) dataUrls.push(await canvasToJpegBlob(downscaleCanvas(c, 1800)).then(blobToDataUrl));
       const result = await analyzeImage(dataUrls);
-      if (categoryPreset) result.category = categoryPreset;
+      result.kind = kindPreset || "purchase"; // 入口が種別を決める（科目は利用者が選択）
       currentImage = evidenceBlob;
       currentImageKind = "receipt";
       if (editingId) {
@@ -3698,9 +3731,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
   $("image-input").addEventListener("change", () => onReceiptFileChosen($("image-input"), ""));
-  $("hotel-input").addEventListener("change", () => onReceiptFileChosen($("hotel-input"), "宿泊費"));
-  // タクシー・飛行機等の紙のレシート/領収書: レシートOCRで読み、勘定科目だけ交通費に固定する
-  $("transit-photo-input").addEventListener("change", () => onReceiptFileChosen($("transit-photo-input"), "交通費"));
+  $("hotel-input").addEventListener("change", () => onReceiptFileChosen($("hotel-input"), "hotel"));
+  // タクシー・飛行機等の紙のレシート/領収書: レシートOCRで読み、種別だけ交通費フローにする
+  $("transit-photo-input").addEventListener("change", () => onReceiptFileChosen($("transit-photo-input"), "transit"));
 
   // 手入力などで証憑画像の無い既存明細に、後から写真を追加して解析する。
   // 交通費: スクショを直接解析（複数枚選択時は重なり連結して1枚に）。トリミング不要のため
@@ -3723,7 +3756,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // 交通費でも、カメラ写真（JPEG/HEIC）はタクシー等のレシートとしてトリミング→レシートOCRへ。
     // 経路スクショ（iPhone/PCのスクリーンショットはPNG）だけを経路として直接解析する
     const allPng = files.every((f) => f.type === "image/png");
-    if ($("f-category").value !== "交通費" || !allPng) {
+    if (formKind !== "transit" || !allPng) {
       await openCropForFile(files[0]);
       return;
     }
@@ -4258,7 +4291,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>再解析中...';
     try {
-      const curCategory = $("f-category").value;
       let result;
       // 交通費の明細は「経路スクショ」と「タクシー等のレシート」の2種類があるため、
       // 保存時に記録した種別（img_kind）でプロンプトを選ぶ。種別が無い旧データは
@@ -4267,7 +4299,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const isRouteImage = editRow && editRow.img_kind
         ? editRow.img_kind === "route"
         : editImageBlob.type === "image/png";
-      if (curCategory === "交通費" && isRouteImage) {
+      if (formKind === "transit" && isRouteImage) {
         // 連結スクショは縦長のことがあるため、取込時と同じく分割して送る
         // （原寸で読み込む。端末内の画像は同じ端末で作られたものなのでキャンバス上限に収まる）
         const canvas = await loadCanvasFromFile(editImageBlob, 100000);
@@ -4301,7 +4333,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("image-input").value = "";
     $("hotel-input").value = "";
     $("transit-photo-input").value = "";
-    setReceiptCategoryPreset("");
+    setCaptureKindPreset("");
     await deleteImage(CROP_DRAFT_IMAGE_ID).catch(() => {});
     showMessage("", "");
   });
@@ -4349,8 +4381,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       currentImageKind = "receipt";
       const dataUrl = await canvasToJpegBlob(croppedCanvas, 0.85).then(blobToDataUrl);
       const result = await analyzeImage(dataUrl);
-      // 宿泊費の入口から取り込んだ写真は、OCRの判定によらず勘定科目を宿泊費に固定する
-      if (receiptCategoryPreset) result.category = receiptCategoryPreset;
+      // 入口の種別（購入費・交通費🎫・宿泊費）を結果に載せる（科目は利用者が選択）
+      result.kind = captureKindPreset || "purchase";
       if (editingId) {
         // 既存明細への写真の後付け（編集中に「写真を追加して解析」から来た場合）:
         // 新規フォームを開き直さず、編集中のフォームへ結果を反映する。
@@ -4392,24 +4424,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("manual-btn").addEventListener("click", () => {
     currentImage = null;
     editingId = null;
-    openForm({ date: "", vendor: "", amount: 0, category: "", memo: "" });
+    openForm({ date: "", vendor: "", amount: 0, category: "", memo: "", kind: "purchase" });
     saveDraft();
   });
 
-  // 交通費の手入力（証憑画像なし）: 勘定科目を交通費に、日付を今日にして開く
+  // 交通費の手入力（証憑画像なし）: 種別を交通費フローに、日付を今日にして開く
   // （交通費のOCR取込と同じ初期値。摘要に行程を直接書く使い方を想定）
   $("transit-manual-btn").addEventListener("click", () => {
     currentImage = null;
     editingId = null;
-    openForm({ date: todayString(), vendor: "", amount: 0, category: "交通費", memo: "" });
+    openForm({ date: todayString(), vendor: "", amount: 0, category: "", memo: "", kind: "transit" });
     saveDraft();
   });
 
-  // 宿泊費の手入力（証憑画像なし）: 勘定科目を宿泊費にして開く（他は購入費・立替費と同じ）
+  // 宿泊費の手入力（証憑画像なし）: 種別を宿泊フローにして開く（他は購入費・立替費と同じ）
   $("hotel-manual-btn").addEventListener("click", () => {
     currentImage = null;
     editingId = null;
-    openForm({ date: "", vendor: "", amount: 0, category: "宿泊費", memo: "" });
+    openForm({ date: "", vendor: "", amount: 0, category: "", memo: "", kind: "hotel" });
     saveDraft();
   });
 
@@ -4417,9 +4449,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   // （既存明細の編集中はsaveDraft()内でno-opになる）
   $("form-step").addEventListener("input", () => saveDraft());
   $("form-step").addEventListener("change", () => saveDraft());
-
-  // 勘定科目を切り替えたら宿泊終了日・往復区分欄の表示を追従させる
-  $("f-category").addEventListener("change", updateCategoryFields);
 
   // 証憑PNGからの明細復元（設定タブ）
   $("restore-input").addEventListener("change", async () => {
@@ -4514,9 +4543,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     const category = $("f-category").value;
     const memo = $("f-memo").value.trim();
     const note = $("f-note").value.trim();
-    // 2つ目の日付・往復区分は該当する場合だけ保存する（科目を変えた場合の残骸を持ち越さない）
-    const tripType = category === "交通費" ? $("f-trip-type").value : "";
-    const dateTo = category === "宿泊費" || (category === "交通費" && tripType === "往復")
+    // 2つ目の日付・往復区分は種別が該当する場合だけ保存する（残骸を持ち越さない）
+    const tripType = formKind === "transit" ? $("f-trip-type").value : "";
+    const dateTo = formKind === "hotel" || (formKind === "transit" && tripType === "往復")
       ? $("f-date-to").value : "";
     if (dateTo && date && dateTo < date) {
       showMessage("error", "2つ目の日付（宿泊終了日・復路の日付）は日付以降にしてください。");
@@ -4534,7 +4563,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // 後から写真を追加した場合」のみ添付する（既存画像の差し替えはしない）
       const row = rows.find((x) => x.id === editingId);
       if (row) {
-        Object.assign(row, { date, date_to: dateTo, trip_type: tripType, vendor, amount, category, memo, note, needs_review: needsReview, split_people: splitPeople });
+        Object.assign(row, { date, date_to: dateTo, trip_type: tripType, kind: formKind, vendor, amount, category, memo, note, needs_review: needsReview, split_people: splitPeople });
         if (currentImage && (!row.filename || row.filename === "(手入力)")) {
           row.filename = makeImageFilename(row, currentImage.type === "image/png" ? "png" : "jpg");
           row.img_kind = currentImageKind || "receipt";
@@ -4564,7 +4593,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const row = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
-      date, date_to: dateTo, trip_type: tripType, vendor, amount, category, memo, note,
+      date, date_to: dateTo, trip_type: tripType, kind: formKind, vendor, amount, category, memo, note,
       needs_review: needsReview,
       split_people: splitPeople,
       created_at: new Date().toISOString(),

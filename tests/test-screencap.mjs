@@ -253,7 +253,7 @@ assert(
 // 解析まで通る
 await page.click("#transit-analyze-btn");
 await page.waitForSelector("#form-step:not(.hidden)", { timeout: 10000 });
-assert((await page.inputValue("#f-category")) === "交通費", "画面キャプチャ: 解析して交通費フォームが開く");
+assert(await page.locator("#trip-type-wrap:not(.hidden)").count() === 1, "画面キャプチャ: 解析して交通費フロー（往復区分欄あり）のフォームが開く");
 // OCRには元の3ページではなく、重複除去済みの連結画像の分割（この寸法では1枚）が渡る
 assert(receivedImageCount === 1, `画面キャプチャ: OCRには連結画像の分割が渡る（実際: ${receivedImageCount}枚）`);
 await page.click("#cancel-btn");

@@ -58,7 +58,7 @@ assert(
 await page.click("#transit-manual-btn");
 await page.waitForSelector("#form-step:not(.hidden)", { timeout: 5000 });
 const manualToday = await page.evaluate(() => todayString());
-assert((await page.inputValue("#f-category")) === "交通費", "交通費の手入力: 勘定科目が交通費で開く");
+assert(await page.locator("#trip-type-wrap:not(.hidden)").count() === 1, "交通費の手入力: 交通費フロー（往復区分欄あり）で開く");
 assert((await page.inputValue("#f-date")) === manualToday, "交通費の手入力: 日付が今日で開く");
 await page.click("#cancel-btn");
 await page.waitForSelector("#capture-step:not(.hidden)");
@@ -66,7 +66,7 @@ await page.waitForSelector("#capture-step:not(.hidden)");
 // --- 宿泊費の手入力: 勘定科目=宿泊費（日付は空＝購入費・立替費と同じ）でフォームが開く ---
 await page.click("#hotel-manual-btn");
 await page.waitForSelector("#form-step:not(.hidden)", { timeout: 5000 });
-assert((await page.inputValue("#f-category")) === "宿泊費", "宿泊費の手入力: 勘定科目が宿泊費で開く");
+assert(await page.locator("#date-to-wrap:not(.hidden)").count() === 1, "宿泊費の手入力: 宿泊フロー（宿泊終了日欄あり）で開く");
 assert((await page.inputValue("#f-date")) === "", "宿泊費の手入力: 日付は空のまま開く");
 await page.click("#cancel-btn");
 await page.waitForSelector("#capture-step:not(.hidden)");
@@ -104,7 +104,7 @@ assert(receivedPrompt.includes("経路検索アプリのスクリーンショッ
 assert(receivedPrompt.includes("徒歩の区間は除外する"), "交通費: プロンプトで徒歩区間の除外を指示している");
 assert(receivedPrompt.includes("distance_km"), "交通費: プロンプトで距離（概算）の出力を指示している");
 assert(receivedPrompt.includes("乗車順に全て挙げる"), "交通費: プロンプトで全路線の列挙を指示している");
-assert((await page.inputValue("#f-category")) === "交通費", "交通費: 勘定科目が交通費になる");
+assert(await page.locator("#trip-type-wrap:not(.hidden)").count() === 1 && (await page.inputValue("#f-category")) === "", "交通費: 交通費フローで開く（科目は自動設定されず利用者が選択）");
 assert((await page.inputValue("#f-amount")) === "409", `交通費: 運賃が金額に入る（実際: ${await page.inputValue("#f-amount")}）`);
 assert((await page.inputValue("#f-vendor")) === "東京メトロ東西線", `交通費: 支払先が路線名になる（実際: ${await page.inputValue("#f-vendor")}）`);
 // 行程（区間の内訳）が1行1区間で摘要に入る（摘要は文字数制限なし・改行可のtextarea）
@@ -132,7 +132,7 @@ assert(!fullscreenDuringTransit, "交通費: トリミングエディタは開�
 await page.click("#save-btn");
 await page.waitForSelector("#capture-step:not(.hidden)");
 const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("shiden_expense_receipts"))[0]);
-assert(saved.category === "交通費" && saved.amount === 409, "保存: 交通費明細として保存される");
+assert(saved.kind === "transit" && saved.amount === 409, "保存: 交通費明細（kind=transit）として保存される");
 const savedImage = await page.evaluate(async () => {
   const rows = JSON.parse(localStorage.getItem("shiden_expense_receipts"));
   const blob = await getImage(rows[0].id).catch(() => null);
@@ -320,7 +320,7 @@ assert(pastedDims.count === 2 && pastedDims.h > 700,
 // 貼り付けからでも解析へ進める
 await page.click("#transit-analyze-btn");
 await page.waitForSelector("#form-step:not(.hidden)", { timeout: 10000 });
-assert((await page.inputValue("#f-category")) === "交通費", "貼り付け: 解析して交通費フォームが開く");
+assert(await page.locator("#trip-type-wrap:not(.hidden)").count() === 1, "貼り付け: 解析して交通費フローのフォームが開く");
 // 明細フォーム表示中の貼り付けは反応しない（編集の邪魔をしない）
 const canvasesBefore = await page.evaluate(() => (transitCanvases ? transitCanvases.length : 0));
 await pasteImage(600, 700, "編集中の貼り付け", 555);
@@ -348,8 +348,8 @@ assert(true, "宿泊費: 撮影後にトリミングエディタが開く（購�
 await page.waitForFunction(() => !document.getElementById("analyze-btn").disabled);
 await page.click("#analyze-btn");
 await page.waitForSelector("#form-step:not(.hidden)", { timeout: 10000 });
-assert((await page.inputValue("#f-category")) === "宿泊費",
-  `宿泊費: OCRの判定によらず勘定科目が宿泊費に固定される（実際: ${await page.inputValue("#f-category")}）`);
+assert(await page.locator("#date-to-wrap:not(.hidden)").count() === 1,
+  "宿泊費: OCRの判定によらず宿泊フロー（宿泊終了日欄）で開く");
 // 保存して一覧の色分け（ローズのバッジ）を確認
 await page.fill("#f-amount", "12800");
 await page.click("#save-btn");
@@ -384,7 +384,7 @@ assert((await page.inputValue("#f-memo")).includes("距離: 約15km"), "再解�
 assert((await page.inputValue("#f-date")) === dateBeforeReanalyze, "再解析: 日付が読めない場合は既存の日付を据え置く");
 // 依頼内容・用途は利用者の記入のため上書きされない
 assert((await page.inputValue("#f-note")) === "大会出張", "再解析: 依頼内容・用途は保持される");
-assert((await page.inputValue("#f-category")) === "交通費", "再解析: 交通費明細は経路プロンプトで解析され科目が保たれる");
+assert(await page.locator("#trip-type-wrap:not(.hidden)").count() === 1, "再解析: 交通費明細は経路プロンプトで解析され種別が保たれる");
 // 画像がある明細では「写真を追加して解析」の入口は出ない
 const addPhotoHiddenWithImage = await page.evaluate(() => document.getElementById("edit-add-photo").offsetParent === null);
 assert(addPhotoHiddenWithImage, "写真の後付け: 画像のある明細では入口が出ない");
@@ -483,8 +483,8 @@ await page.waitForFunction(() => !document.getElementById("analyze-btn").disable
 await page.click("#analyze-btn");
 await page.waitForSelector("#form-step:not(.hidden)", { timeout: 10000 });
 assert(receivedPrompt.includes("店舗レシートまたは領収書"), "タクシー: レシートOCRプロンプトで解析される");
-assert((await page.inputValue("#f-category")) === "交通費",
-  `タクシー: 勘定科目が交通費に固定される（実際: ${await page.inputValue("#f-category")}）`);
+assert(await page.locator("#trip-type-wrap:not(.hidden)").count() === 1,
+  "タクシー: 交通費フロー（往復区分欄あり）で開く");
 assert((await page.inputValue("#f-amount")) === "409", "タクシー: 金額が自動入力される");
 await page.fill("#f-note", "タクシーテスト");
 await page.click("#save-btn");
@@ -508,7 +508,7 @@ await page.waitForFunction(
   { timeout: 10000 }
 );
 assert(receivedPrompt.includes("店舗レシートまたは領収書"), "タクシー: 再解析もレシートOCRで行われる（img_kindによる判別）");
-assert((await page.inputValue("#f-category")) === "交通費", "タクシー: 再解析後も科目は交通費のまま");
+assert(await page.locator("#trip-type-wrap:not(.hidden)").count() === 1, "タクシー: 再解析後も交通費フローのまま");
 await page.click("#cancel-btn");
 await page.waitForSelector("#panel-list.active");
 
@@ -556,7 +556,7 @@ await page.waitForSelector("#capture-step:not(.hidden)");
 await page.click('nav button[data-panel="list"]');
 await page.waitForSelector("#panel-list.active");
 const tripMeta = await page.locator(".receipt-item", { hasText: "往復テスト" }).locator(".meta").textContent();
-assert(tripMeta.includes("交通費（往復）"), `往復区分: 一覧の科目行に（往復）が付く（実際: ${tripMeta}）`);
+assert(tripMeta.includes("（往復）"), `往復区分: 一覧の科目行に（往復）が付く（実際: ${tripMeta}）`);
 const tripOut = await page.evaluate(() => {
   const rows = JSON.parse(localStorage.getItem("shiden_expense_receipts"));
   const r = rows.find((x) => x.note === "往復テスト");

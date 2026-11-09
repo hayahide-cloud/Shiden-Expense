@@ -79,7 +79,7 @@ await page.fill("#f-amount", "abc1,2340xyz");
 const amountSanitized = await page.inputValue("#f-amount");
 assert(amountSanitized === "12,340", `金額入力: 数字以外を除去して再整形（実際: ${amountSanitized}）`);
 await page.fill("#f-amount", "29720");
-await page.selectOption("#f-category", "会議費");
+await page.selectOption("#f-category", "本部会議費");
 await page.fill("#f-memo", "御食事代");
 await page.screenshot({ path: `${shots}/2_form.png` });
 await page.click("#save-btn");
@@ -88,7 +88,7 @@ await page.waitForSelector("#capture-step:not(.hidden)");
 // 2件目（要確認あり: 金額0）
 await page.click("#manual-btn");
 await page.fill("#f-vendor", "コンビニ");
-await page.selectOption("#f-category", "消耗品費");
+await page.selectOption("#f-category", "事務用消耗品費");
 await page.click("#save-btn");
 
 // 一覧タブ
@@ -198,7 +198,7 @@ assert(editedTitle === "INPEX労組との会食", `編集: 備考ありは主見
 const editedMeta = await page.textContent(".receipt-item .meta");
 assert(editedMeta.includes("割烹よし田 博多"), `編集: 支払先がメタ情報に表示される（実際: ${editedMeta}）`);
 // 勘定科目と摘要は別の行（「 / 」区切りの1行ではない）
-assert(/会議費\n/.test(editedMeta) && !editedMeta.includes("会議費 / "),
+assert(/本部会議費\n/.test(editedMeta) && !editedMeta.includes("本部会議費 / "),
   `一覧: 勘定科目と摘要が別行で表示される（実際: ${JSON.stringify(editedMeta)}）`);
 
 // 依頼内容・用途は2行のtextareaで、改行を含めて保存できる。CSVでは引用符でエスケープされる
