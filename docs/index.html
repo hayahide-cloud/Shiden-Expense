@@ -817,10 +817,12 @@
       <!-- エクスポートのメインはExcel（1明細1シート＋写真）。ZIPはExpenseVBAへの
            CSV取込・原本一括書き出し用の補助。CSVのみは使われなくなったため廃止
            （CSV生成自体はZIP内とPNG埋め込みで現役） -->
-      <button id="export-xlsx-btn">Excelエクスポート（1明細1シート＋写真）</button>
+      <button id="export-xlsx-btn">Excelエクスポート（精算書：旅費・購入・証憑）</button>
       <button id="export-zip-btn" class="ghost">ZIPエクスポート（CSV＋証憑画像）</button>
-      <p class="note">Excelは先頭に一覧シート、続いて明細ごとに1シート（項目＋証憑写真）が入ります。
-        写真は原本のまま埋め込まれる（画質劣化なし）ため、ファイルサイズは大きめです。<br>
+      <p class="note">Excelは組合の提出フォーマット（旅費/日当/休暇補償 精算書・購入精算書・証憑シート）で
+        出力します。交通費・宿泊は「旅費」、購入費・立替費は「購入」に振り分け、同じ科目で日付が重なる
+        明細は1つの出張にまとめます。証憑写真は通し番号のシートに原本のまま貼られます（画質劣化なし）。
+        氏名・所属は設定タブで登録してください。行先・分類は空欄なのでExcel側で記入します。<br>
         ZIPはCSV（UTF-8 BOM付き）＋証憑画像の一括書き出しで、ExpenseVBAの明細シートへの
         取込に使えます。</p>
     </div>
@@ -861,6 +863,20 @@
       <!-- OpenAIはAPIキー経由でクレジット残高を取得する公式APIを提供していないため、
            アプリ内表示ではなく公式の利用状況ページへのリンクにとどめている -->
       <a id="openai-usage-link" class="ghost link-btn" href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener">📊 OpenAIの利用状況を見る</a>
+    </div>
+    <div class="card">
+      <h2>精算書（Excel）の設定</h2>
+      <!-- Excelエクスポートの精算書ヘッダーに入る値。組合の提出フォーマット固有の項目 -->
+      <label>氏名
+        <input type="text" id="s-claimant-name" placeholder="例: 五十嵐　駿秀">
+      </label>
+      <label>所属
+        <input type="text" id="s-claimant-dept" placeholder="例: 中央本部">
+      </label>
+      <label>団体名
+        <input type="text" id="s-org-name" placeholder="INPEX労働組合">
+      </label>
+      <p class="note">「Excelエクスポート（精算書）」のヘッダーに記載されます。「設定を保存」で保存します。</p>
     </div>
     <div class="card">
       <h2>GitHub同期（Hayahide-Log）</h2>
@@ -971,7 +987,8 @@
 "use strict";
 
 // ===== 定数（ExpenseVBA・フル構成版と同一のスキーマ・文言を維持する） =====
-// 勘定科目: 組合会計の支出科目一覧（2026-11にオーナー指定で差し替え。旧: 交通費等の汎用7科目）。
+// 勘定科目: 組合会計の支出科目一覧・32科目（2026-11にオーナー指定で差し替え。旧: 交通費等の汎用7科目）。
+// 組合の精算書Excel「購入」シートのドロップダウン元リストと順番まで一致している
 // 科目は取込フロー（往復区分・宿泊終了日・色分け）から独立しており、フローはkind（種別）が担う。
 // ※ExpenseVBA（Excel側）の科目リストも合わせる場合は別途更新が必要
 const CATEGORIES = [
@@ -1029,7 +1046,7 @@ function rowKind(r) {
 let formKind = "purchase";
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-11-09.121 勘定科目を組合会計の支出科目一覧に差し替え";
+const APP_VERSION = "2026-11-09.122 Excelを組合の精算書フォーマットで出力";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)がベース。科目の自動判定は、科目を組合会計の
 // 支出科目一覧（定期大会等、レシートからは判定不能）へ差し替えた際に廃止した（利用者が選択する）
@@ -2057,13 +2074,45 @@ function buildZip(entries) {
   });
 }
 
-// ===== Excelエクスポート（1明細1シート・自前実装） =====
-// .xlsxの実体はZIP+XML（Office Open XML）。ZIPは自前実装(buildZip・無圧縮)を流用し、
-// ライブラリなしで生成する。先頭に「一覧」シート、続いて明細1件につき1シート
-// （文字データ＋証憑写真をdrawing XMLで貼り付け）という構成。
-// 写真は保存されている証憑を縮小・再圧縮せず原本のまま埋め込む（画質劣化ゼロ。
-// シート上の表示は幅440pxに抑え、拡大すれば原寸で見られる。ファイルサイズは増えるが
-// 原本性優先。当初は1200px JPEGに縮小していたが画質不足のため原本埋め込みに変更）
+// ===== Excelエクスポート（組合の精算書フォーマット・自前実装） =====
+// 組合（INPEX労働組合）の月次提出用Excel「旅費/日当/休暇補償 精算書」「購入精算書」
+// 「証憑シート」を、提出済みの原本(.xlsm)を解析した法則どおりに生成する。
+// .xlsxの実体はZIP+XML（Office Open XML）なので、ZIP自前実装(buildZip)を流用して
+// ライブラリなしで組み立てる（原本のマクロは「前月分削除」ボタンだけなので載せない）。
+//
+// 原本から読み取った法則（詳細はREADME）:
+// - 旅費: 1人30行（ヘッダー5行＋5行ブロック×5）。ブロック1行目=出発日/行先/予算科目/
+//   150km以上○×/ホテル名/証憑No、2行目=帰着日/用務内容/精算総額(数式)/日当/人数/実費額、
+//   E〜H列に交通費の区間（分類/発/着/精算額）を最大5行。精算総額 = IF(H1行目="","",日当+SUM(精算額5行)+実費額)
+// - 購入: 4行目から1行1件（発注日/予算科目/依頼内容/数量/単価/金額(数式)/証憑No/備考）。合計行はSUM
+// - 証憑: 旅費→購入の順の通し番号をシート名にし、A1に番号（"No."表示）、画像を貼る。精算書の証憑No列と対応
+// - 書式: 日付は和暦（旅費 ge.mm.dd／購入 ge.m.d）、金額は #,##0_);[Red](#,##0)、本文は游ゴシック11pt、
+//   タイトルはHG丸ｺﾞｼｯｸM-PRO 18pt太字、枠線非表示、旅費は横向き76%・購入は横向き・証憑は縦向き
+//
+// アプリのデータとの対応（オーナーとの合意事項）:
+// - 種別(kind)で振り分け: transit/hotel→旅費、purchase→購入
+// - 旅費は「同じ予算科目で日付範囲が重なる明細」を1ブロック（1出張）にまとめる（往路・復路・宿泊が1つの証憑Noになる）
+// - 日当は150km以上の移動がある出張のみ 3,000円×日数（出発日〜帰着日）。150kmは摘要の「距離: 約Nkm」で
+//   判定し、距離が無い場合は○×・日当とも空欄（Excel側で手入力）
+// - 行先・分類（鉄道/タクシー等）は空欄（Excel側で手入力）。区間ごとの金額は無いため明細の金額を区間1行目に入れる
+
+const SEISANSHO = {
+  dailyAllowance: 3000, // 日当（1日あたり・円）
+  longTripKm: 150,      // 「150km以上の移動有無」の閾値
+  travelRowsPerPage: 30,
+  travelBlocksPerPage: 5,
+  purchaseMinRows: 19,  // 原本の明細行数（4〜22行目）。超えた分は下に伸ばす
+  evidenceImageMaxWidthPx: 600,
+  travelCols: { A: 10.3, B: 47.3, C: 20.5, D: 9, E: 9.7, F: 15.4, G: 16.4, H: 9, I: 24.7, J: 7.7, K: 8.1, L: 9, N: 67, O: 9 },
+  purchaseCols: { A: 12.5, B: 23.3, C: 54, D: 7.2, E: 10.3, F: 13, G: 9.8, H: 21.8, I: 6, J: 61, K: 3 },
+  evidenceCols: { A: 13.2, B: 5.9, I: 5.5, J: 8.7 },
+  // 原本の注意書き（そのまま転記）
+  travelNote1: "・都市鉄道・バスの交通費については、証憑は不要です\n　\n・都市鉄道・バス以外の交通費については、実費額を証明する以下の証憑を、当Excelの証憑シート（足りない場合はシートを追加）に貼付けてください（証憑がない分は支給しません）\n\n◇新幹線　　：ネット検索画面（Yahoo!路線情報、えきねっと等）の画面画像\n◇タクシー　 ：領収書\n◇車           ：使用前に満タンまで給油した時点および使用後に給油した時点の領収書",
+  travelNote2: "・実費精算が困難な場合は、非実費精算の理由を明記の上、下記金額で精算します\n（止むを得ない事情がある場合を除き、実費精算にて申請のこと）\n\n甲地宿泊料11,000、 乙地宿泊料9,000\n 寮宿泊料3,000、　  車中宿泊料 3,000 \n\n※実際の支給額は精算総額のうち休暇補償に係る源泉税を控除した額になります",
+  purchaseNote1: "・物品／図書購入やセミナー受講の際は、金額の多寡に関わらず、事前にメールで、中央本部専従役員及び財政部にご相談下さい（事前相談の際、当シートの提出は不要です）\n【メール宛先】\n　TO:中央執行委員長（専従）、中央執行副委員長（専従）\n　CC:事務局長、財政部長\n\n・当Excelに証憑（領収書等）を添付して下さい（証憑が無い分は支給しません）",
+  purchaseNote2: "・非専従役員が立替えた場合、非専従役員の労金個人口座へ振込します\n\n・但し、一般組合員が物品購入する場合、或いは、高額で立替えできない場合に限り、仮払申請書を作成いただければ、銀行口座へお振込致します\n\n・仮払金の送金口座は、支部の場合⇒支部口座、本部の場合⇒現金支給又は非専従役員のろうきん個人口座とさせて頂きます\n\n・支部口座への仮払金は、振込後に遅滞なく必要経費をお支払頂き、受領印/署名取得後の一般組合員精算書をPDFにて財政部へ送付してください\n加えて、支部口座からの引出しに係る通帳記入を行い、PDFで送付ください",
+  purchaseNote3: "備考：2014年11月以降、支部事務長及び担当者の捺印は不要です",
+};
 
 const xmlEscape = (v) => String(v ?? "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -2083,187 +2132,485 @@ function imageDimensions(blob) {
   });
 }
 
-// シート名の制約: 31文字以内・[ ] : * ? / \ 禁止・重複不可。
-// 連番プレフィックスで一意性と並び順を保証する
-function xlsxSheetName(row, index) {
-  const date = (row.date || "日付なし").replaceAll("-", "").slice(4); // MMDD
-  const vendor = (row.vendor || "支払先なし").replace(/[\[\]:*?\/\\'"]/g, "").slice(0, 12);
-  return `${String(index + 1).padStart(2, "0")}_${date}_${vendor}`.slice(0, 31);
+// 列番号(1始まり)→列記号、"YYYY-MM-DD"→Excelシリアル値
+function xlsxColLetter(n) {
+  let s = "";
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+function xlsxColIndex(letter) {
+  let n = 0;
+  for (const ch of letter) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n;
+}
+function excelSerial(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || "");
+  if (!m) return null;
+  return Math.round((Date.UTC(+m[1], +m[2] - 1, +m[3]) - Date.UTC(1899, 11, 30)) / 86400000);
 }
 
-// セル1つ分のXML。type: "s"=文字（折り返し）, "h"=見出し（太字）, "n"=数値
-function xlsxCell(ref, value, type) {
-  if (type === "n") return `<c r="${ref}"><v>${Number(value) || 0}</v></c>`;
-  const style = type === "h" ? "2" : "1";
-  return `<c r="${ref}" t="inlineStr" s="${style}"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
-}
-
-// ラベル/値ペアの明細シート。imageRef があれば末尾に描画参照を付ける
-function xlsxDetailSheet(pairs, hasDrawing) {
-  const rows = pairs.map(([label, value, type], i) => {
-    const r = i + 1;
-    return `<row r="${r}">${xlsxCell(`A${r}`, label, "h")}${xlsxCell(`B${r}`, value, type || "s")}</row>`;
-  }).join("");
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<cols><col min="1" max="1" width="16" customWidth="1"/><col min="2" max="2" width="64" customWidth="1"/></cols>
-<sheetData>${rows}</sheetData>
-${hasDrawing ? '<drawing r:id="rId1"/>' : ""}
-</worksheet>`;
-}
-
-// 一覧（目次）シート
-function xlsxSummarySheet(rows, sheetNames) {
-  const headers = ["シート", "日付", "支払先", "金額", "勘定科目", "摘要", "依頼内容・用途"];
-  const headerXml = `<row r="1">${headers.map((h, c) =>
-    xlsxCell(String.fromCharCode(65 + c) + "1", h, "h")).join("")}</row>`;
-  const bodyXml = rows.map((r, i) => {
-    const n = i + 2;
-    const cells = [
-      [sheetNames[i], "s"], [r.date, "s"], [r.vendor, "s"], [r.amount, "n"],
-      [r.category, "s"], [r.memo, "s"], [r.note ?? "", "s"],
-    ];
-    return `<row r="${n}">${cells.map(([v, t], c) =>
-      xlsxCell(String.fromCharCode(65 + c) + n, v, t)).join("")}</row>`;
-  }).join("");
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<cols><col min="1" max="1" width="20" customWidth="1"/><col min="2" max="2" width="12" customWidth="1"/><col min="3" max="3" width="22" customWidth="1"/><col min="4" max="4" width="10" customWidth="1"/><col min="5" max="5" width="10" customWidth="1"/><col min="6" max="6" width="40" customWidth="1"/><col min="7" max="7" width="30" customWidth="1"/></cols>
-<sheetData>${headerXml}${bodyXml}</sheetData>
-</worksheet>`;
-}
-
-// 写真1枚をシートに貼るdrawing XML。位置はA列・anchorRow行目から、表示サイズはpx指定
-// （EMU = px × 9525。埋め込みJPEGは1200pxでも、表示は幅440px程度に抑えて見やすくする）
-function xlsxDrawing(displayW, displayH, anchorRow) {
-  const cx = Math.round(displayW * 9525);
-  const cy = Math.round(displayH * 9525);
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<xdr:oneCellAnchor>
-<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${anchorRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
-<xdr:ext cx="${cx}" cy="${cy}"/>
-<xdr:pic>
-<xdr:nvPicPr><xdr:cNvPr id="1" name="証憑画像"/><xdr:cNvPicPr/></xdr:nvPicPr>
-<xdr:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
-<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
-</xdr:pic>
-<xdr:clientData/>
-</xdr:oneCellAnchor>
-</xdr:wsDr>`;
-}
-
-// 固定の最小styles.xml。s=1: 折り返し＋上寄せ（値セル）、s=2: 太字（見出しセル）
-const XLSX_STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+// スタイル表。セルに使う {font, fmt, border, h, v, wrap} の組み合わせを登録し、
+// cellXfsの番号を返す。最後にstyles.xmlへ書き出す
+function createXlsxStyles() {
+  const fonts = [];
+  const numFmts = [];
+  const xfs = [];
+  const index = new Map();
+  const fontId = (f) => {
+    const spec = { name: f.name || "游ゴシック", size: f.size || 11, bold: !!f.bold };
+    const k = JSON.stringify(spec);
+    let i = fonts.findIndex((x) => JSON.stringify(x) === k);
+    if (i < 0) { fonts.push(spec); i = fonts.length - 1; }
+    return i;
+  };
+  const fmtId = (code) => {
+    if (!code) return 0;
+    let i = numFmts.indexOf(code);
+    if (i < 0) { numFmts.push(code); i = numFmts.length - 1; }
+    return 164 + i;
+  };
+  const style = (spec = {}) => {
+    const k = JSON.stringify(spec);
+    if (index.has(k)) return index.get(k);
+    xfs.push({ fontId: fontId(spec.font || {}), numFmtId: fmtId(spec.fmt), borderId: spec.border ? 1 : 0, h: spec.h, v: spec.v, wrap: spec.wrap });
+    index.set(k, xfs.length - 1);
+    return xfs.length - 1;
+  };
+  const xml = () => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<fonts count="2"><font><sz val="11"/><name val="Yu Gothic"/></font><font><b/><sz val="11"/><name val="Yu Gothic"/></font></fonts>
+${numFmts.length ? `<numFmts count="${numFmts.length}">${numFmts.map((c, i) => `<numFmt numFmtId="${164 + i}" formatCode="${xmlEscape(c)}"/>`).join("")}</numFmts>` : ""}
+<fonts count="${fonts.length}">${fonts.map((f) => `<font>${f.bold ? "<b/>" : ""}<sz val="${f.size}"/><name val="${xmlEscape(f.name)}"/></font>`).join("")}</fonts>
 <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
-<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color auto="1"/></left><right style="thin"><color auto="1"/></right><top style="thin"><color auto="1"/></top><bottom style="thin"><color auto="1"/></bottom><diagonal/></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="3">
-<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
-<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
-<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
-</cellXfs>
+<cellXfs count="${xfs.length}">${xfs.map((x) => {
+    const align = x.h || x.v || x.wrap
+      ? `<alignment${x.h ? ` horizontal="${x.h}"` : ""}${x.v ? ` vertical="${x.v}"` : ""}${x.wrap ? ' wrapText="1"' : ""}/>` : "";
+    return `<xf numFmtId="${x.numFmtId}" fontId="${x.fontId}" fillId="0" borderId="${x.borderId}" xfId="0" applyFont="1"${x.numFmtId ? ' applyNumberFormat="1"' : ""}${x.borderId ? ' applyBorder="1"' : ""}${align ? ' applyAlignment="1"' : ""}>${align}</xf>`;
+  }).join("")}</cellXfs>
 </styleSheet>`;
+  return { style, xml };
+}
 
-// rows（エクスポート対象の明細）から.xlsxのBlobを生成する
-async function buildXlsx(rows) {
+// シート1枚分のビルダー。セルは set(row, col, value, styleIdx, type) で積み、最後にXML化する。
+// type: "s"=文字列, "n"=数値, "f"=数式, 省略かつvalue=nullなら罫線だけの空セル
+function createXlsxSheet(name) {
+  const rows = new Map();
+  const sheet = {
+    name, merges: [], colWidths: {}, rowHeights: {}, validations: [], images: [],
+    view: { gridLines: false, zoom: 100, freezeRow: 0, selected: false },
+    page: { orientation: "landscape", scale: null }, printArea: null,
+    set(r, c, value, styleIdx, type) {
+      const colLetter = typeof c === "number" ? xlsxColLetter(c) : c;
+      const ref = `${colLetter}${r}`;
+      const s = styleIdx != null ? ` s="${styleIdx}"` : "";
+      let xml;
+      if (value === null || value === undefined || value === "") xml = `<c r="${ref}"${s}/>`;
+      else if (type === "n") xml = `<c r="${ref}"${s}><v>${Number(value)}</v></c>`;
+      else if (type === "f") xml = `<c r="${ref}"${s}><f>${xmlEscape(value)}</f></c>`;
+      else xml = `<c r="${ref}"${s} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+      if (!rows.has(r)) rows.set(r, new Map());
+      rows.get(r).set(xlsxColIndex(colLetter), xml);
+    },
+    xml() {
+      const cols = Object.entries(this.colWidths).map(([L, w]) => {
+        const i = xlsxColIndex(L);
+        return `<col min="${i}" max="${i}" width="${w}" customWidth="1"/>`;
+      }).join("");
+      const sheetData = [...rows.keys()].sort((a, b) => a - b).map((r) => {
+        const ht = this.rowHeights[r];
+        const cells = [...rows.get(r).entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]).join("");
+        return `<row r="${r}"${ht ? ` ht="${ht}" customHeight="1"` : ""}>${cells}</row>`;
+      }).join("");
+      const merges = this.merges.length
+        ? `<mergeCells count="${this.merges.length}">${this.merges.map((m) => `<mergeCell ref="${m}"/>`).join("")}</mergeCells>` : "";
+      const dvs = this.validations.length
+        ? `<dataValidations count="${this.validations.length}">${this.validations.map((v) =>
+          `<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" sqref="${v.sqref}"><formula1>${xmlEscape(v.formula)}</formula1></dataValidation>`).join("")}</dataValidations>` : "";
+      const pane = this.view.freezeRow
+        ? `<pane ySplit="${this.view.freezeRow}" topLeftCell="A${this.view.freezeRow + 1}" activePane="bottomLeft" state="frozen"/>` : "";
+      return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+${this.page.fitToWidth ? '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>' : ""}
+<sheetViews><sheetView${this.view.selected ? ' tabSelected="1"' : ""} showGridLines="${this.view.gridLines ? 1 : 0}" zoomScale="${this.view.zoom}" workbookViewId="0">${pane}</sheetView></sheetViews>
+<sheetFormatPr defaultRowHeight="18"/>
+${cols ? `<cols>${cols}</cols>` : ""}
+<sheetData>${sheetData}</sheetData>
+${merges}${dvs}
+<pageMargins left="0.7086614173228347" right="0.4724409448818898" top="0.6692913385826772" bottom="0.1968503937007874" header="0.3" footer="0.3"/>
+<pageSetup paperSize="9"${this.page.scale ? ` scale="${this.page.scale}"` : ""}${this.page.fitToWidth ? ' fitToWidth="1" fitToHeight="0"' : ""} orientation="${this.page.orientation}"/>
+${this.images.length ? '<drawing r:id="rId1"/>' : ""}
+</worksheet>`;
+    },
+  };
+  return sheet;
+}
+
+// 写真1枚以上をシートに貼るdrawing XML。原本と同じtwoCellAnchor（開始セル〜終了セルの範囲）で
+// 貼る（oneCellAnchor＋サイズ指定の縮小表示は、LibreOfficeで左上が欠けて描画されることがあった）。
+// 画像ごとに from(col,row) と to(col,row,colOff,rowOff) を呼び出し側で計算しておく
+function xlsxDrawingXml(images) {
+  const anchors = images.map((img, i) => {
+    const cx = Math.round(img.displayW * 9525);
+    const cy = Math.round(img.displayH * 9525);
+    return `<xdr:twoCellAnchor editAs="oneCell">
+<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${img.anchorRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+<xdr:to><xdr:col>${img.toCol}</xdr:col><xdr:colOff>${img.toColOff}</xdr:colOff><xdr:row>${img.toRow}</xdr:row><xdr:rowOff>${img.toRowOff}</xdr:rowOff></xdr:to>
+<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${i + 2}" name="証憑画像${i + 1}"/><xdr:cNvPicPr/></xdr:nvPicPr>
+<xdr:blipFill><a:blip r:embed="rId${i + 1}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>
+<xdr:clientData/>
+</xdr:twoCellAnchor>`;
+  }).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">${anchors}</xdr:wsDr>`;
+}
+
+// 交通費の摘要（1行1区間「A→B」＋「距離: 約Nkm」＋「往復: ...」）を分解する
+function parseTransitMemo(memo) {
+  const legs = [];
+  const remarks = [];
+  let distanceKm = 0;
+  for (const raw of String(memo || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const dist = /^距離:\s*約?([\d.]+)\s*km$/.exec(line);
+    const leg = /^(.+?)→(.+)$/.exec(line);
+    if (dist) distanceKm = parseFloat(dist[1]) || 0;
+    else if (leg) legs.push({ from: leg[1].trim(), to: leg[2].trim() });
+    else remarks.push(line);
+  }
+  return { legs, remarks, distanceKm };
+}
+
+// 旅費の明細（交通費・宿泊）を「1出張＝1ブロック」にまとめる。
+// 同じ予算科目で日付範囲（日付〜終了日）が重なる・連続する明細を同じ出張とみなす
+function groupTravelBlocks(travelRows) {
+  const items = travelRows.map((r) => ({ row: r, start: r.date || "", end: r.date_to || r.date || "" }))
+    .sort((a, b) => (a.start || "9999").localeCompare(b.start || "9999"));
+  const blocks = [];
+  for (const it of items) {
+    const target = it.start ? blocks.find((b) => b.category === (it.row.category || "") && b.start && it.start <= b.end) : null;
+    if (target) {
+      target.rows.push(it.row);
+      if (it.end > target.end) target.end = it.end;
+    } else {
+      blocks.push({ category: it.row.category || "", start: it.start, end: it.end, rows: [it.row] });
+    }
+  }
+  return blocks;
+}
+
+// ブロックの表示内容（区間行・日当・宿泊・備考）を組み立てる。区間が5行を超える分は
+// 同じ日付・科目の続きブロックへ送る（区間の金額を落とさないため）
+function buildTravelBlockLines(block) {
+  const lines = [];
+  const remarks = [];
+  let maxKm = 0;
+  let hasDistance = false;
+  const hotels = [];
+  for (const r of block.rows) {
+    if (rowKind(r) === "hotel") {
+      hotels.push(r);
+      if (r.memo) remarks.push(r.memo);
+      continue;
+    }
+    const parsed = parseTransitMemo(r.memo);
+    if (parsed.distanceKm > 0) { hasDistance = true; maxKm = Math.max(maxKm, parsed.distanceKm); }
+    const legs = parsed.legs.length ? parsed.legs : [{ from: "", to: "" }];
+    legs.forEach((leg, i) => lines.push({ from: leg.from, to: leg.to, amount: i === 0 ? Number(r.amount) || 0 : null }));
+    if (r.vendor) remarks.push(r.vendor);
+    remarks.push(...parsed.remarks);
+  }
+  const notes = [...new Set(block.rows.map((r) => (r.note || "").trim()).filter(Boolean))];
+  let mark = "";
+  let allowance = null;
+  if (hasDistance) {
+    mark = maxKm >= SEISANSHO.longTripKm ? "○" : "×";
+    const s = excelSerial(block.start), e = excelSerial(block.end);
+    if (mark === "○" && s != null && e != null) allowance = SEISANSHO.dailyAllowance * (e - s + 1);
+  }
+  const hotelName = hotels.map((h) => h.vendor).filter(Boolean).join("、");
+  const hotelGuests = hotels.length ? Math.max(1, ...hotels.map((h) => (h.split_people >= 2 ? h.split_people : 1))) : null;
+  const hotelAmount = hotels.length ? hotels.reduce((sum, h) => sum + (Number(h.amount) || 0), 0) : null;
+  return { lines, notes, remarks: [...new Set(remarks)], mark, allowance, hotelName, hotelGuests, hotelAmount };
+}
+
+// 精算書ブック全体を生成する。rowsはエクスポート対象の明細（月フィルタ適用済み）
+async function buildSeisanshoXlsx(rows) {
+  const settings = loadSettings();
+  const claimant = settings.claimantName || "";
+  const dept = settings.claimantDept || "";
+  const org = settings.orgName || "INPEX労働組合";
+  const st = createXlsxStyles();
+  const S = {
+    title: st.style({ font: { name: "HG丸ｺﾞｼｯｸM-PRO", size: 18, bold: true }, v: "top" }),
+    label12: st.style({ font: { size: 12 }, h: "center" }),
+    text12: st.style({ font: { size: 12 } }),
+    right12: st.style({ font: { size: 12 }, h: "right" }),
+    section: st.style({ font: { size: 10, bold: true }, v: "center" }),
+    headC: st.style({ border: true, h: "center", v: "center" }),
+    headL: st.style({ border: true, h: "left", v: "center" }),
+    headLB: st.style({ font: { bold: true }, border: true, h: "left", v: "center" }),
+    head10: st.style({ font: { size: 10 }, border: true, h: "center", v: "center", wrap: true }),
+    cellC: st.style({ border: true, h: "center", v: "center" }),
+    cellL: st.style({ border: true, h: "left", v: "center" }),
+    cell10: st.style({ font: { size: 10 }, border: true, v: "center" }),
+    dateT: st.style({ fmt: "[$-411]ge.mm.dd;@", border: true, h: "center", v: "center" }),
+    dateP: st.style({ fmt: "[$-411]ge.m.d;@", border: true, h: "center", v: "center" }),
+    amount: st.style({ fmt: "#,##0_);[Red](#,##0)", border: true, v: "center" }),
+    amountC: st.style({ fmt: "#,##0_);[Red](#,##0)", border: true, h: "center", v: "center" }),
+    total: st.style({ font: { size: 13, bold: true }, fmt: "#,##0_);[Red](#,##0)", border: true, h: "center", v: "center" }),
+    note10: st.style({ font: { size: 10 }, v: "center" }),
+    note9: st.style({ font: { size: 9 }, h: "left", v: "top", wrap: true }),
+    text11: st.style({}),
+    right11: st.style({ h: "right" }),
+    evNo: st.style({ font: { size: 12, bold: true }, fmt: '"No."General', h: "center", v: "center" }),
+    ev8: st.style({ font: { size: 8 }, v: "center" }),
+    listHead: st.style({ font: { size: 10, bold: true } }),
+    list: st.style({ font: { size: 10 } }),
+  };
+  const sheets = [];
+  const evidenceSheets = []; // { number, blobs: [Blob] }
+  let evidenceNo = 0;
+  const assignEvidence = async (sourceRows) => {
+    const blobs = [];
+    for (const r of sourceRows) {
+      if (!r.filename || r.filename === "(手入力)") continue;
+      const b = await getImage(r.id).catch(() => null);
+      if (b) blobs.push(b);
+    }
+    if (!blobs.length) return "-";
+    evidenceNo++;
+    evidenceSheets.push({ number: evidenceNo, blobs });
+    return String(evidenceNo);
+  };
+
+  // ---------- 旅費 ----------
+  const travelRows = rows.filter((r) => rowKind(r) !== "purchase");
+  const travel = createXlsxSheet("旅費");
+  travel.colWidths = SEISANSHO.travelCols;
+  travel.view = { gridLines: false, zoom: 70, freezeRow: 0, selected: true };
+  travel.page = { orientation: "landscape", fitToWidth: true }; // 原本は76%固定だが環境差で収まらないため横幅合わせに
+  // ブロックを組み、区間5行を超える分は続きブロックへ
+  const blocks = [];
+  for (const b of groupTravelBlocks(travelRows)) {
+    const built = buildTravelBlockLines(b);
+    const evidence = await assignEvidence(b.rows);
+    for (let i = 0; i < Math.max(1, Math.ceil(built.lines.length / 5)); i++) {
+      blocks.push({
+        start: b.start, end: b.end, category: b.category, evidence,
+        lines: built.lines.slice(i * 5, i * 5 + 5),
+        first: i === 0, notes: built.notes, remarks: built.remarks,
+        mark: built.mark, allowance: built.allowance,
+        hotelName: built.hotelName, hotelGuests: built.hotelGuests, hotelAmount: built.hotelAmount,
+      });
+    }
+  }
+  const pages = Math.max(1, Math.ceil(blocks.length / SEISANSHO.travelBlocksPerPage));
+  for (let p = 0; p < pages; p++) {
+    const o = p * SEISANSHO.travelRowsPerPage; // 行オフセット
+    travel.rowHeights[o + 1] = 27; travel.rowHeights[o + 2] = 9;
+    for (let r = 3; r <= 30; r++) travel.rowHeights[o + r] = 18;
+    travel.set(o + 1, "A", "旅費/日当/休暇補償　精算書", S.title);
+    travel.set(o + 1, "E", "氏名：", S.label12);
+    travel.set(o + 1, "F", claimant, S.text12);
+    travel.set(o + 1, "G", "所属：", S.label12);
+    travel.set(o + 1, "H", dept, S.text12);
+    travel.set(o + 1, "K", org, S.right12);
+    travel.set(o + 3, "D", "【手当】", S.section);
+    travel.set(o + 3, "E", "【交通費】", S.section);
+    travel.set(o + 3, "I", "【宿泊料】", S.section);
+    const head = [["A", "出発日", "帰着日", S.headC], ["B", " 行先", " 用務内容/備考", S.headL], ["C", " 予算科目", " 精算総額", S.headL]];
+    for (const [col, top, bottom, style] of head) {
+      travel.set(o + 4, col, top, style);
+      travel.set(o + 5, col, bottom, col === "C" ? S.headLB : style);
+    }
+    travel.set(o + 4, "D", "150km以上の移動有無", S.head10);
+    travel.set(o + 5, "D", "日当", S.headC);
+    travel.set(o + 4, "E", "分類", S.headC); travel.set(o + 5, "E", null, S.headC);
+    travel.set(o + 4, "F", "区間", S.headC); travel.set(o + 4, "G", null, S.headC);
+    travel.set(o + 5, "F", null, S.headC); travel.set(o + 5, "G", null, S.headC);
+    travel.set(o + 4, "H", "精算額", S.headC); travel.set(o + 5, "H", null, S.headC);
+    travel.set(o + 4, "I", "ホテル名", S.headC); travel.set(o + 4, "J", null, S.headC);
+    travel.set(o + 5, "I", "人数", S.headC); travel.set(o + 5, "J", "実費額", S.headC);
+    travel.set(o + 4, "K", "証憑No", S.headC); travel.set(o + 5, "K", null, S.headC);
+    travel.merges.push(`E${o + 4}:E${o + 5}`, `F${o + 4}:G${o + 5}`, `H${o + 4}:H${o + 5}`, `I${o + 4}:J${o + 4}`, `K${o + 4}:K${o + 5}`);
+    if (p === 0) {
+      travel.set(3, "N", "<記入上の注意：2014年11月以降>", S.note10);
+      travel.set(4, "N", SEISANSHO.travelNote1, S.note9);
+      travel.set(12, "N", SEISANSHO.travelNote2, S.note9);
+      travel.merges.push("N4:N11", "N12:N17");
+    }
+    for (let bi = 0; bi < SEISANSHO.travelBlocksPerPage; bi++) {
+      const top = o + 6 + bi * 5;
+      const block = blocks[p * SEISANSHO.travelBlocksPerPage + bi] || null;
+      // 空セルにも罫線を引いて原本どおりの枠にする
+      for (let r = top; r < top + 5; r++) {
+        travel.set(r, "A", null, S.dateT); travel.set(r, "B", null, S.cellL); travel.set(r, "C", null, S.cellL);
+        travel.set(r, "D", null, S.amountC); travel.set(r, "E", null, S.cellC); travel.set(r, "F", null, S.cell10);
+        travel.set(r, "G", null, S.cell10); travel.set(r, "H", null, S.amount); travel.set(r, "I", null, S.cellL);
+        travel.set(r, "J", null, S.amount); travel.set(r, "K", null, S.cellC);
+      }
+      travel.set(top + 1, "C", `IF(H${top}="","",D${top + 1}+SUM(H${top}:H${top + 4})+J${top + 1})`, S.total, "f");
+      travel.validations.push({ sqref: `D${top}`, formula: '"○,×"' }, { sqref: `E${top}:E${top + 4}`, formula: '"鉄道,タクシー,バス,車,船,他"' });
+      if (!block) continue;
+      const startSerial = excelSerial(block.start), endSerial = excelSerial(block.end);
+      if (startSerial != null) travel.set(top, "A", startSerial, S.dateT, "n");
+      if (endSerial != null) travel.set(top + 1, "A", endSerial, S.dateT, "n");
+      travel.set(top, "C", block.category, S.cellL);
+      travel.set(top, "K", block.evidence, S.cellC);
+      if (block.first) {
+        travel.set(top, "D", block.mark, S.cellC);
+        if (block.allowance != null) travel.set(top + 1, "D", block.allowance, S.amountC, "n");
+        travel.set(top + 1, "B", block.notes.join(" / "), S.cellL);
+        block.remarks.slice(0, 3).forEach((text, i) => travel.set(top + 2 + i, "B", text, S.cellL));
+        if (block.hotelName) travel.set(top, "I", block.hotelName, S.cellL);
+        if (block.hotelGuests != null) travel.set(top + 1, "I", block.hotelGuests, S.amountC, "n");
+        if (block.hotelAmount != null) travel.set(top + 1, "J", block.hotelAmount, S.amount, "n");
+      } else {
+        travel.set(top + 1, "B", "（前ブロックの続き）", S.cellL);
+      }
+      block.lines.forEach((line, i) => {
+        travel.set(top + i, "F", line.from, S.cell10);
+        travel.set(top + i, "G", line.to, S.cell10);
+        if (line.amount != null) travel.set(top + i, "H", line.amount, S.amount, "n");
+      });
+    }
+  }
+  travel.printArea = `$A$1:$K$${pages * SEISANSHO.travelRowsPerPage}`;
+  sheets.push(travel);
+  const travelEvidenceCount = evidenceSheets.length;
+
+  // ---------- 購入 ----------
+  const purchaseRows = rows.filter((r) => rowKind(r) === "purchase")
+    .sort((a, b) => (a.date || "9999").localeCompare(b.date || "9999"));
+  const purchase = createXlsxSheet("購入");
+  purchase.colWidths = SEISANSHO.purchaseCols;
+  purchase.view = { gridLines: false, zoom: 100, freezeRow: 3, selected: false };
+  purchase.page = { orientation: "landscape", fitToWidth: true };
+  purchase.rowHeights[1] = 29; purchase.rowHeights[2] = 14.5;
+  purchase.set(1, "A", "購入精算書", S.title);
+  purchase.set(1, "C", "氏名：", S.right11);
+  purchase.set(1, "D", claimant, S.text11);
+  purchase.set(1, "F", "所属：", S.right11);
+  purchase.set(1, "G", dept, S.text11);
+  purchase.set(1, "H", org, S.text11);
+  ["発注日", "予算科目", "依頼内容/用途", "数量", "単価", "金額", "証憑No", "備考"].forEach((h, i) => purchase.set(3, i + 1, h, S.headC));
+  purchase.rowHeights[3] = 21.5;
+  const dataRows = Math.max(SEISANSHO.purchaseMinRows, purchaseRows.length);
+  for (let i = 0; i < dataRows; i++) {
+    const r = 4 + i;
+    purchase.rowHeights[r] = 21.5;
+    purchase.set(r, "A", null, S.dateP); purchase.set(r, "B", null, S.cellL); purchase.set(r, "C", null, S.cellL);
+    purchase.set(r, "D", null, S.cellC); purchase.set(r, "E", null, S.amountC); purchase.set(r, "G", null, S.amountC);
+    purchase.set(r, "H", null, S.cellL);
+    purchase.set(r, "F", `IF(E${r}="","",D${r}*E${r})`, S.amountC, "f");
+    const row = purchaseRows[i];
+    if (!row) continue;
+    const serial = excelSerial(row.date);
+    if (serial != null) purchase.set(r, "A", serial, S.dateP, "n");
+    purchase.set(r, "B", row.category || "", S.cellL);
+    purchase.set(r, "C", row.note || row.memo || "", S.cellL);
+    purchase.set(r, "D", 1, S.cellC, "n");
+    purchase.set(r, "E", Number(row.amount) || 0, S.amountC, "n");
+    purchase.set(r, "G", await assignEvidence([row]), S.cellC);
+    purchase.set(r, "H", [row.vendor, row.note ? row.memo : ""].filter(Boolean).join(" / "), S.cellL);
+  }
+  const totalRow = 4 + dataRows;
+  purchase.rowHeights[totalRow] = 25.5;
+  purchase.set(totalRow, "E", "合計：", S.right11);
+  purchase.set(totalRow, "F", `SUM(F4:F${totalRow - 1})`, S.amountC, "f");
+  purchase.set(3, "J", "<記入上の注意：2014年11月以降>", S.text11);
+  purchase.set(4, "J", SEISANSHO.purchaseNote1, S.note9);
+  purchase.set(10, "J", SEISANSHO.purchaseNote2, S.note9);
+  purchase.set(18, "J", SEISANSHO.purchaseNote3, S.note9);
+  purchase.merges.push("J4:J9", "J10:J17");
+  // 予算科目のドロップダウン元（原本と同じく印刷範囲外に置く）
+  const listTop = totalRow + 6;
+  purchase.set(listTop, "A", "予算科目", S.listHead);
+  CATEGORIES.forEach((c, i) => purchase.set(listTop + 1 + i, "A", c, S.list));
+  purchase.validations.push({ sqref: `B4:B${totalRow - 1}`, formula: `$A$${listTop + 1}:$A$${listTop + CATEGORIES.length}` });
+  purchase.printArea = `$A$1:$H$${totalRow}`;
+  sheets.push(purchase);
+
+  // ---------- 証憑シート（旅費の分は旅費の直後、購入の分は購入の直後に並べる） ----------
+  const evidenceSheetFor = async (ev) => {
+    const sh = createXlsxSheet(String(ev.number));
+    sh.colWidths = SEISANSHO.evidenceCols;
+    sh.view = { gridLines: false, zoom: 55, freezeRow: 0, selected: false };
+    sh.page = { orientation: "portrait", fitToWidth: true };
+    sh.set(1, "A", ev.number, S.evNo, "n");
+    sh.set(1, "B", "（証憑PDFを貼付）", S.ev8);
+    // 画像の終了セル: 列幅（文字数）→px は 幅×7+5、既定列幅8.43文字≒64px。行高は既定18pt=24px
+    const colPx = (idx) => { const w = SEISANSHO.evidenceCols[xlsxColLetter(idx + 1)]; return w ? Math.round(w * 7 + 5) : 64; };
+    const ROW_PX = 24;
+    let anchorRow = 2; // 0始まり（3行目）
+    for (const blob of ev.blobs) {
+      const dim = await imageDimensions(blob);
+      const scale = Math.min(1, SEISANSHO.evidenceImageMaxWidthPx / dim.width);
+      const displayW = Math.round(dim.width * scale), displayH = Math.round(dim.height * scale);
+      let toCol = 0, remainW = displayW;
+      while (remainW >= colPx(toCol)) { remainW -= colPx(toCol); toCol++; }
+      const toRow = anchorRow + Math.floor(displayH / ROW_PX);
+      sh.images.push({ blob, displayW, displayH, anchorRow, toCol, toColOff: remainW * 9525, toRow, toRowOff: (displayH % ROW_PX) * 9525 });
+      anchorRow = toRow + 2;
+    }
+    sh.printArea = `$A$1:$L$${Math.max(51, anchorRow)}`;
+    return sh;
+  };
+  const ordered = [travel];
+  for (const ev of evidenceSheets.slice(0, travelEvidenceCount)) ordered.push(await evidenceSheetFor(ev));
+  ordered.push(purchase);
+  for (const ev of evidenceSheets.slice(travelEvidenceCount)) ordered.push(await evidenceSheetFor(ev));
+
+  // ---------- パッケージ化 ----------
   const encoder = new TextEncoder();
-  const sheetNames = rows.map((r, i) => xlsxSheetName(r, i));
   const entries = [];
   const overrides = [];
   const wbSheets = [];
   const wbRels = [];
-
-  // シート1: 一覧（目次）
-  const sheetCount = rows.length + 1;
-  wbSheets.push(`<sheet name="一覧" sheetId="1" r:id="rId1"/>`);
-  wbRels.push(`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>`);
-  entries.push({ name: "xl/worksheets/sheet1.xml", data: encoder.encode(xlsxSummarySheet(rows, sheetNames)) });
-  overrides.push(`<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`);
-
-  // シート2以降: 明細1件につき1シート
+  const definedNames = [];
   let drawingCount = 0;
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
-    const sheetNo = i + 2;
-    const pairs = [["日付", r.date || ""]];
-    if (r.date_to) pairs.push([rowKind(r) === "hotel" ? "宿泊終了日" : "復路の日付", r.date_to]);
-    pairs.push(["支払先", r.vendor || ""], ["金額", r.amount, "n"], ["勘定科目", r.category || ""]);
-    if (r.trip_type) pairs.push(["往復区分", r.trip_type]);
-    pairs.push(["摘要", r.memo || ""], ["依頼内容・用途", r.note || ""]);
-    if (r.split_people >= 2) {
-      pairs.push(["按分人数", r.split_people, "n"],
-        ["1人あたり請求額", Math.floor(Number(r.amount) / r.split_people), "n"]);
-    }
-    if (r.needs_review) pairs.push(["要確認", r.needs_review]);
-    pairs.push(["取込日時", formatDateTime(r.created_at)], ["元ファイル名", r.filename || ""]);
-
-    // 証憑写真: 保存済みの原本をそのまま埋め込む（再圧縮しない）。寸法だけ読み取る
-    let drawingXml = null;
-    let imageData = null;
-    let imageExt = "png";
-    const blob = r.filename && r.filename !== "(手入力)" ? await getImage(r.id).catch(() => null) : null;
-    if (blob) {
-      imageData = new Uint8Array(await blob.arrayBuffer());
-      imageExt = blob.type === "image/jpeg" ? "jpeg" : "png";
-      const dim = await imageDimensions(blob);
-      // 表示は幅440px（約11.6cm）を上限に縦横比を保つ（拡大すれば原寸で見られる）
-      const scale = Math.min(1, 440 / dim.width);
-      drawingXml = xlsxDrawing(Math.round(dim.width * scale), Math.round(dim.height * scale), pairs.length + 1);
-    }
-
-    entries.push({ name: `xl/worksheets/sheet${sheetNo}.xml`, data: encoder.encode(xlsxDetailSheet(pairs, !!drawingXml)) });
-    overrides.push(`<Override PartName="/xl/worksheets/sheet${sheetNo}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`);
-    wbSheets.push(`<sheet name="${xmlEscape(sheetNames[i])}" sheetId="${sheetNo}" r:id="rId${sheetNo}"/>`);
-    wbRels.push(`<Relationship Id="rId${sheetNo}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${sheetNo}.xml"/>`);
-
-    if (drawingXml) {
+  let mediaCount = 0;
+  for (let i = 0; i < ordered.length; i++) {
+    const sh = ordered[i];
+    const n = i + 1;
+    entries.push({ name: `xl/worksheets/sheet${n}.xml`, data: encoder.encode(sh.xml()) });
+    overrides.push(`<Override PartName="/xl/worksheets/sheet${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`);
+    wbSheets.push(`<sheet name="${xmlEscape(sh.name)}" sheetId="${n}" r:id="rId${n}"/>`);
+    wbRels.push(`<Relationship Id="rId${n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${n}.xml"/>`);
+    if (sh.printArea) definedNames.push(`<definedName name="_xlnm.Print_Area" localSheetId="${i}">'${xmlEscape(sh.name).replace(/'/g, "''")}'!${sh.printArea}</definedName>`);
+    if (sh.images.length) {
       drawingCount++;
       const d = drawingCount;
-      entries.push({ name: `xl/drawings/drawing${d}.xml`, data: encoder.encode(drawingXml) });
-      entries.push({ name: `xl/media/image${d}.${imageExt}`, data: imageData });
-      entries.push({
-        name: `xl/worksheets/_rels/sheet${sheetNo}.xml.rels`,
-        data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing${d}.xml"/></Relationships>`),
-      });
-      entries.push({
-        name: `xl/drawings/_rels/drawing${d}.xml.rels`,
-        data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image${d}.${imageExt}"/></Relationships>`),
-      });
+      const imgRels = [];
+      for (const img of sh.images) {
+        mediaCount++;
+        const ext = img.blob.type === "image/jpeg" ? "jpeg" : "png";
+        entries.push({ name: `xl/media/image${mediaCount}.${ext}`, data: new Uint8Array(await img.blob.arrayBuffer()) });
+        imgRels.push(`<Relationship Id="rId${imgRels.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image${mediaCount}.${ext}"/>`);
+      }
+      entries.push({ name: `xl/drawings/drawing${d}.xml`, data: encoder.encode(xlsxDrawingXml(sh.images)) });
+      entries.push({ name: `xl/drawings/_rels/drawing${d}.xml.rels`, data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${imgRels.join("")}</Relationships>`) });
+      entries.push({ name: `xl/worksheets/_rels/sheet${n}.xml.rels`, data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing${d}.xml"/></Relationships>`) });
       overrides.push(`<Override PartName="/xl/drawings/drawing${d}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>`);
     }
   }
+  const stylesRid = ordered.length + 1;
+  entries.push({ name: "xl/workbook.xml", data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${wbSheets.join("")}</sheets>${definedNames.length ? `<definedNames>${definedNames.join("")}</definedNames>` : ""}<calcPr fullCalcOnLoad="1"/></workbook>`) });
+  entries.push({ name: "xl/_rels/workbook.xml.rels", data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${wbRels.join("")}<Relationship Id="rId${stylesRid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`) });
+  entries.push({ name: "xl/styles.xml", data: encoder.encode(st.xml()) });
+  entries.push({ name: "_rels/.rels", data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`) });
+  entries.unshift({ name: "[Content_Types].xml", data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="png" ContentType="image/png"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${overrides.join("")}</Types>`) });
 
-  // ブック定義・スタイル・パッケージ定義
-  const stylesRid = sheetCount + 1;
-  entries.push({
-    name: "xl/workbook.xml",
-    data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${wbSheets.join("")}</sheets></workbook>`),
-  });
-  entries.push({
-    name: "xl/_rels/workbook.xml.rels",
-    data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${wbRels.join("")}<Relationship Id="rId${stylesRid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`),
-  });
-  entries.push({ name: "xl/styles.xml", data: encoder.encode(XLSX_STYLES) });
-  entries.push({
-    name: "_rels/.rels",
-    data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`),
-  });
-  entries.unshift({
-    name: "[Content_Types].xml",
-    data: encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="png" ContentType="image/png"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${overrides.join("")}</Types>`),
-  });
-
-  const zipBlob = buildZip(entries);
-  return new Blob([zipBlob], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  return new Blob([buildZip(entries)], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
 
 // OpenAI Vision APIを直接呼び出して領収書を解析する
@@ -3629,6 +3976,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("s-ghtoken").placeholder = `設定済み（末尾: ...${settings.ghToken.slice(-4)}）変更する場合のみ入力`;
   }
   $("s-ghrepo").value = settings.ghRepo ?? "";
+  $("s-claimant-name").value = settings.claimantName ?? "";
+  $("s-claimant-dept").value = settings.claimantDept ?? "";
+  $("s-org-name").value = settings.orgName ?? "";
   $("s-model").value = settings.model ?? DEFAULT_MODEL;
   // 保存済みのモデルが選択肢に無い場合（旧バージョンの自由入力値など）は既定値に戻す
   if ($("s-model").value === "") $("s-model").value = DEFAULT_MODEL;
@@ -4801,7 +5151,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Excelエクスポート（1明細1シート＋写真）
+  // Excelエクスポート（組合の精算書フォーマット: 旅費・購入・証憑シート）
   $("export-xlsx-btn").addEventListener("click", async () => {
     const { month, rows } = getExportRows();
     if (rows.length === 0) {
@@ -4812,12 +5162,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>Excel作成中...';
     try {
-      downloadBlob(await buildXlsx(rows), `receipts_${month || "all"}.xlsx`);
+      downloadBlob(await buildSeisanshoXlsx(rows), `seisansho_${month || "all"}.xlsx`);
     } catch (err) {
       alert("Excelの作成に失敗しました: " + err.message);
     } finally {
       btn.disabled = false;
-      btn.textContent = "Excelエクスポート（1明細1シート＋写真）";
+      btn.textContent = "Excelエクスポート（精算書：旅費・購入・証憑）";
     }
   });
 
@@ -4835,6 +5185,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       apiKey,
       ghToken,
       ghRepo: $("s-ghrepo").value.trim(),
+      claimantName: $("s-claimant-name").value.trim(),
+      claimantDept: $("s-claimant-dept").value.trim(),
+      orgName: $("s-org-name").value.trim(),
       model: $("s-model").value.trim() || DEFAULT_MODEL,
     }));
     $("s-apikey").value = "";
