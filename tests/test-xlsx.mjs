@@ -156,6 +156,7 @@ assert(travel.includes('<mergeCell ref="E4:E5"/>') && travel.includes('<mergeCel
 assert(cell(travel, "A6")?.value === serial("2026-10-14") && cell(travel, "A7")?.value === serial("2026-10-16"),
   `旅費: 出発日=交通費の日付、帰着日=宿泊終了日（実際: ${cell(travel, "A6")?.value}, ${cell(travel, "A7")?.value}）`);
 assert(cell(travel, "C6")?.text === "春闘方針案説明会", "旅費: 予算科目");
+assert(cell(travel, "B6")?.text === "泉外旭川駅", `旅費: 行先に往路の最終到着地が入る（実際: ${cell(travel, "B6")?.text}）`);
 assert(cell(travel, "D6")?.text === "○" && cell(travel, "D7")?.value === "9000",
   `旅費: 600km→150km以上○、日当=3,000円×3日（実際: ${cell(travel, "D6")?.text}, ${cell(travel, "D7")?.value}）`);
 assert(cell(travel, "F6")?.text === "東京駅" && cell(travel, "G6")?.text === "秋田駅" && cell(travel, "F7")?.text === "秋田駅" && cell(travel, "G7")?.text === "泉外旭川駅",

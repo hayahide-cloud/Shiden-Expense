@@ -822,7 +822,7 @@
       <p class="note">Excelは組合の提出フォーマット（旅費/日当/休暇補償 精算書・購入精算書・証憑シート）で
         出力します。交通費・宿泊は「旅費」、購入費・立替費は「購入」に振り分け、同じ科目で日付が重なる
         明細は1つの出張にまとめます。証憑写真は通し番号のシートに原本のまま貼られます（画質劣化なし）。
-        氏名・所属は設定タブで登録してください。行先・分類は空欄なのでExcel側で記入します。<br>
+        氏名・所属は設定タブで登録してください。行先は往路の到着地を自動で入れます（分類は空欄なのでExcel側で記入）。<br>
         ZIPはCSV（UTF-8 BOM付き）＋証憑画像の一括書き出しで、ExpenseVBAの明細シートへの
         取込に使えます。</p>
     </div>
@@ -1046,7 +1046,7 @@ function rowKind(r) {
 let formKind = "purchase";
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-11-10.123 精算書の証憑写真の縦横比を修正";
+const APP_VERSION = "2026-11-10.124 精算書の行先を自動入力（1段ずれの解消）";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)がベース。科目の自動判定は、科目を組合会計の
 // 支出科目一覧（定期大会等、レシートからは判定不能）へ差し替えた際に廃止した（利用者が選択する）
@@ -2094,7 +2094,8 @@ function buildZip(entries) {
 // - 旅費は「同じ予算科目で日付範囲が重なる明細」を1ブロック（1出張）にまとめる（往路・復路・宿泊が1つの証憑Noになる）
 // - 日当は150km以上の移動がある出張のみ 3,000円×日数（出発日〜帰着日）。150kmは摘要の「距離: 約Nkm」で
 //   判定し、距離が無い場合は○×・日当とも空欄（Excel側で手入力）
-// - 行先・分類（鉄道/タクシー等）は空欄（Excel側で手入力）。区間ごとの金額は無いため明細の金額を区間1行目に入れる
+// - 行先は往路の最終到着地（宿泊のみの出張はホテル名）を自動で入れる。分類（鉄道/タクシー等）は空欄
+//   （Excel側で手入力）。区間ごとの金額は無いため明細の金額を区間1行目に入れる
 
 const SEISANSHO = {
   dailyAllowance: 3000, // 日当（1日あたり・円）
@@ -2310,6 +2311,10 @@ function buildTravelBlockLines(block) {
   let maxKm = 0;
   let hasDistance = false;
   const hotels = [];
+  // 行先: ブロック内で最初の移動（往路）の最終到着地。行程の無い明細（タクシー領収書等）しか
+  // 無ければ空、宿泊だけの出張はホテル名を入れる（オーナー指定。行先欄が空だと用務内容が
+  // 出発日より1行下から始まり、1段ずれて見えるため自動で埋める）
+  let destination = "";
   for (const r of block.rows) {
     if (rowKind(r) === "hotel") {
       hotels.push(r);
@@ -2318,6 +2323,7 @@ function buildTravelBlockLines(block) {
     }
     const parsed = parseTransitMemo(r.memo);
     if (parsed.distanceKm > 0) { hasDistance = true; maxKm = Math.max(maxKm, parsed.distanceKm); }
+    if (!destination && parsed.legs.length) destination = parsed.legs[parsed.legs.length - 1].to;
     const legs = parsed.legs.length ? parsed.legs : [{ from: "", to: "" }];
     legs.forEach((leg, i) => lines.push({ from: leg.from, to: leg.to, amount: i === 0 ? Number(r.amount) || 0 : null }));
     if (r.vendor) remarks.push(r.vendor);
@@ -2332,9 +2338,10 @@ function buildTravelBlockLines(block) {
     if (mark === "○" && s != null && e != null) allowance = SEISANSHO.dailyAllowance * (e - s + 1);
   }
   const hotelName = hotels.map((h) => h.vendor).filter(Boolean).join("、");
+  if (!destination && lines.length === 0) destination = hotelName;
   const hotelGuests = hotels.length ? Math.max(1, ...hotels.map((h) => (h.split_people >= 2 ? h.split_people : 1))) : null;
   const hotelAmount = hotels.length ? hotels.reduce((sum, h) => sum + (Number(h.amount) || 0), 0) : null;
-  return { lines, notes, remarks: [...new Set(remarks)], mark, allowance, hotelName, hotelGuests, hotelAmount };
+  return { lines, notes, remarks: [...new Set(remarks)], mark, allowance, hotelName, hotelGuests, hotelAmount, destination };
 }
 
 // 精算書ブック全体を生成する。rowsはエクスポート対象の明細（月フィルタ適用済み）
@@ -2403,7 +2410,7 @@ async function buildSeisanshoXlsx(rows) {
         start: b.start, end: b.end, category: b.category, evidence,
         lines: built.lines.slice(i * 5, i * 5 + 5),
         first: i === 0, notes: built.notes, remarks: built.remarks,
-        mark: built.mark, allowance: built.allowance,
+        mark: built.mark, allowance: built.allowance, destination: built.destination,
         hotelName: built.hotelName, hotelGuests: built.hotelGuests, hotelAmount: built.hotelAmount,
       });
     }
@@ -2462,6 +2469,7 @@ async function buildSeisanshoXlsx(rows) {
       travel.set(top, "C", block.category, S.cellL);
       travel.set(top, "K", block.evidence, S.cellC);
       if (block.first) {
+        travel.set(top, "B", block.destination, S.cellL);
         travel.set(top, "D", block.mark, S.cellC);
         if (block.allowance != null) travel.set(top + 1, "D", block.allowance, S.amountC, "n");
         travel.set(top + 1, "B", block.notes.join(" / "), S.cellL);
