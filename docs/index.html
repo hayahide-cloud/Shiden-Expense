@@ -1046,7 +1046,7 @@ function rowKind(r) {
 let formKind = "purchase";
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-11-09.122 Excelを組合の精算書フォーマットで出力";
+const APP_VERSION = "2026-11-10.123 精算書の証憑写真の縦横比を修正";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)がベース。科目の自動判定は、科目を組合会計の
 // 支出科目一覧（定期大会等、レシートからは判定不能）へ差し替えた際に廃止した（利用者が選択する）
@@ -2233,7 +2233,7 @@ function createXlsxSheet(name) {
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
 ${this.page.fitToWidth ? '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>' : ""}
 <sheetViews><sheetView${this.view.selected ? ' tabSelected="1"' : ""} showGridLines="${this.view.gridLines ? 1 : 0}" zoomScale="${this.view.zoom}" workbookViewId="0">${pane}</sheetView></sheetViews>
-<sheetFormatPr defaultRowHeight="18"/>
+<sheetFormatPr defaultRowHeight="18" customHeight="1"/>
 ${cols ? `<cols>${cols}</cols>` : ""}
 <sheetData>${sheetData}</sheetData>
 ${merges}${dvs}
@@ -2246,21 +2246,22 @@ ${this.images.length ? '<drawing r:id="rId1"/>' : ""}
   return sheet;
 }
 
-// 写真1枚以上をシートに貼るdrawing XML。原本と同じtwoCellAnchor（開始セル〜終了セルの範囲）で
-// 貼る（oneCellAnchor＋サイズ指定の縮小表示は、LibreOfficeで左上が欠けて描画されることがあった）。
-// 画像ごとに from(col,row) と to(col,row,colOff,rowOff) を呼び出し側で計算しておく
+// 写真1枚以上をシートに貼るdrawing XML。oneCellAnchor（開始セル＋EMUでの表示サイズ）で貼る。
+// 表示サイズがセルの幅・高さに依存しないため、縦横比が常に原本どおりに保たれる
+// （以前は開始〜終了セルで範囲指定するtwoCellAnchorだったが、列幅のピクセル換算が
+//   フォント（游ゴシック）によって見積もりとずれ、Excelで画像が横に引き伸ばされた）
 function xlsxDrawingXml(images) {
   const anchors = images.map((img, i) => {
     const cx = Math.round(img.displayW * 9525);
     const cy = Math.round(img.displayH * 9525);
-    return `<xdr:twoCellAnchor editAs="oneCell">
+    return `<xdr:oneCellAnchor>
 <xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${img.anchorRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
-<xdr:to><xdr:col>${img.toCol}</xdr:col><xdr:colOff>${img.toColOff}</xdr:colOff><xdr:row>${img.toRow}</xdr:row><xdr:rowOff>${img.toRowOff}</xdr:rowOff></xdr:to>
-<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${i + 2}" name="証憑画像${i + 1}"/><xdr:cNvPicPr/></xdr:nvPicPr>
+<xdr:ext cx="${cx}" cy="${cy}"/>
+<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${i + 2}" name="証憑画像${i + 1}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>
 <xdr:blipFill><a:blip r:embed="rId${i + 1}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
 <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>
 <xdr:clientData/>
-</xdr:twoCellAnchor>`;
+</xdr:oneCellAnchor>`;
   }).join("");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">${anchors}</xdr:wsDr>`;
@@ -2542,19 +2543,16 @@ async function buildSeisanshoXlsx(rows) {
     sh.page = { orientation: "portrait", fitToWidth: true };
     sh.set(1, "A", ev.number, S.evNo, "n");
     sh.set(1, "B", "（証憑PDFを貼付）", S.ev8);
-    // 画像の終了セル: 列幅（文字数）→px は 幅×7+5、既定列幅8.43文字≒64px。行高は既定18pt=24px
-    const colPx = (idx) => { const w = SEISANSHO.evidenceCols[xlsxColLetter(idx + 1)]; return w ? Math.round(w * 7 + 5) : 64; };
+    // 画像は縦に並べる。次の画像の開始行は、表示高さ÷行高（18pt=24px。sheetFormatPrで
+    // 既定行高を固定しているので確実）で求め、1行の余白を空ける
     const ROW_PX = 24;
     let anchorRow = 2; // 0始まり（3行目）
     for (const blob of ev.blobs) {
       const dim = await imageDimensions(blob);
       const scale = Math.min(1, SEISANSHO.evidenceImageMaxWidthPx / dim.width);
       const displayW = Math.round(dim.width * scale), displayH = Math.round(dim.height * scale);
-      let toCol = 0, remainW = displayW;
-      while (remainW >= colPx(toCol)) { remainW -= colPx(toCol); toCol++; }
-      const toRow = anchorRow + Math.floor(displayH / ROW_PX);
-      sh.images.push({ blob, displayW, displayH, anchorRow, toCol, toColOff: remainW * 9525, toRow, toRowOff: (displayH % ROW_PX) * 9525 });
-      anchorRow = toRow + 2;
+      sh.images.push({ blob, displayW, displayH, anchorRow });
+      anchorRow += Math.ceil(displayH / ROW_PX) + 1;
     }
     sh.printArea = `$A$1:$L$${Math.max(51, anchorRow)}`;
     return sh;

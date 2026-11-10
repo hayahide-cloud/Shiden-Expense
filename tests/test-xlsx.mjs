@@ -177,6 +177,10 @@ assert(cell(ev1, "A1")?.value === "1" && cell(ev1, "B1")?.text === "（証憑PDF
 const drawing1 = files.get("xl/drawings/drawing1.xml").toString("utf8");
 assert((drawing1.match(/<xdr:pic>/g) || []).length === 2, "証憑1: 同じ出張の画像2枚（経路スクショ＋宿泊領収書）が貼られる");
 assert(files.has("xl/media/image1.png") && files.has("xl/media/image2.png"), "証憑1: 画像が原本PNGで埋め込まれる");
+// 縦横比: 表示サイズ（EMU）が原画像の比率と一致する（セル範囲指定ではなくサイズ指定で貼るため引き伸ばされない）
+const firstExt = /<xdr:oneCellAnchor>[\s\S]*?<xdr:ext cx="(\d+)" cy="(\d+)"/.exec(drawing1);
+assert(firstExt && Math.abs(Number(firstExt[1]) / Number(firstExt[2]) - 600 / 1200) < 0.005,
+  `証憑1: 経路スクショ(600x1200)の縦横比が保たれる（実際: ${firstExt ? (firstExt[1] / firstExt[2]).toFixed(4) : "なし"}）`);
 
 // 購入シート（sheet3）
 const purchase = files.get("xl/worksheets/sheet3.xml").toString("utf8");
