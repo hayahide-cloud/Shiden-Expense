@@ -883,6 +883,13 @@
       <!-- 明細を端末内だけでなくGitHubのプライベートリポジトリにも保存する。
            1明細=1PNG（明細CSV埋め込み済み証憑）として保存するので、リポジトリ上でも
            画像として中身を確認でき、端末が変わっても全件復元できる -->
+      <!-- Shiden Vault で発行した合言葉を入れるだけで、トークンとリポジトリが自動で入る。
+           Vault 側でトークンを更新・再発行すると、同期が 401/403 になった時点で自動で取り直す -->
+      <label>接続コード（Shiden Vault の合言葉）
+        <input type="text" id="s-ghcode" placeholder="合言葉を入れると下の2項目は自動で設定されます" autocapitalize="characters" autocorrect="off" autocomplete="off" spellcheck="false">
+      </label>
+      <button id="gh-code-btn" class="ghost">🔑 接続コードで接続</button>
+      <p class="note">または手入力:</p>
       <label>アクセストークン
         <input type="password" id="s-ghtoken" placeholder="github_pat_...">
       </label>
@@ -1046,7 +1053,7 @@ function rowKind(r) {
 let formKind = "purchase";
 const DEFAULT_MODEL = "gpt-5.4";
 // UIに関わる変更をpushするたびに更新する（設定タブに表示。キャッシュで旧版が出ていないかの確認用）
-const APP_VERSION = "2026-11-10.124 精算書の行先を自動入力（1段ずれの解消）";
+const APP_VERSION = "2026-11-13.125 Shiden Vault の接続コード（合言葉）でGitHub同期を設定";
 
 // OCRプロンプト: ExpenseVBA(modReceiptOCR.bas)がベース。科目の自動判定は、科目を組合会計の
 // 支出科目一覧（定期大会等、レシートからは判定不能）へ差し替えた際に廃止した（利用者が選択する）
@@ -1726,13 +1733,86 @@ async function embedRowIntoImage(blob, row) {
 //     復活する」ためオーナー要望でミラー型に変更。リポジトリ＝端末の写しであり、
 //     過去の履歴が必要な場合はgitの履歴から辿れる）
 
+/* ---------- 紫電 接続コード（Shiden Vault の合言葉で自動接続） ----------
+   Shiden Vault が接続情報（owner / repo / branch / token）を合言葉で暗号化
+   （PBKDF2 → AES-256-GCM）して公開ページ Shiden-Vault/connect.json に置く。
+   設定欄に合言葉を入れると取り込み、合言葉は同一オリジン共有キー
+   "shiden_connect_code" に保存する（同じブラウザの他の紫電アプリも自動で使える）。
+   GitHub API が 401/403 を返したら合言葉で取り直し、Vault 側でトークンを
+   更新・再発行していれば新しいトークンで同じリクエストを1回だけやり直す。
+   このアプリの設定は ghToken / ghRepo（owner/名前）なので、その形に変換して保存する。
+   Vault の「この端末に書き込む」が置く共有キー "shiden_hub_connection" と、
+   #shiden-connect=<base64url JSON> 付きリンクからの取り込みにも対応する。 */
+const CONNECT_URL = "https://hayahide-cloud.github.io/Shiden-Vault/connect.json", CODE_KEY = "shiden_connect_code";
+const normCode = s => String(s || "").normalize("NFKC").replace(/[\s\-ー－_]/g, "").toUpperCase();
+async function fetchConnect(code) {
+  const r = await fetch(CONNECT_URL + "?t=" + Date.now(), { cache: "no-store" });
+  if (r.status === 404) throw new Error("接続コードがまだ発行されていません");
+  if (!r.ok) throw new Error("接続コードの取得に失敗しました（" + r.status + "）");
+  const f = await r.json();
+  if (f.revoked) throw new Error("接続コードは無効化されています");
+  if (f.format !== "shiden-connect" || !f.kdf) throw new Error("接続ファイルの形式が不正です");
+  const u8 = b => Uint8Array.from(atob(b), ch => ch.charCodeAt(0));
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(normCode(code)), "PBKDF2", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt: u8(f.kdf.salt), iterations: f.kdf.iter, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+  let pt;
+  try { pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: u8(f.iv) }, key, u8(f.ct)); }
+  catch (e) { throw new Error("接続コード（合言葉）が違います"); }
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+// 合言葉で接続情報を取り込む。トークンかリポジトリが変わったら true
+async function applyConnectCode(code) {
+  const hub = await fetchConnect(code);
+  if (!hub.token || !hub.owner || !hub.repo) throw new Error("接続情報が不完全です");
+  const s = loadSettings(), repo = `${hub.owner}/${hub.repo}`;
+  const changed = s.ghToken !== hub.token || (s.ghRepo || GH_DEFAULT_REPO).trim() !== repo;
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...s, ghToken: hub.token, ghRepo: repo }));
+  try { localStorage.setItem(CODE_KEY, normCode(code)); } catch {}
+  return changed;
+}
+// 保存済みの合言葉で取り直す（失敗・変化なしは false）
+async function recoverByCode() {
+  let code = ""; try { code = localStorage.getItem(CODE_KEY) || ""; } catch {}
+  if (!code) return false;
+  try { return await applyConnectCode(code); } catch { return false; }
+}
+// Vault の共有キー／リンクからの取り込み（トークン未設定のときだけ。リンクは明示操作なので更新）
+function adoptHubConnection() {
+  const HUB_KEY = "shiden_hub_connection";
+  const m = location.hash.match(/[#&]shiden-connect=([A-Za-z0-9_-]+)/);
+  let hub = null;
+  if (m) {
+    try { hub = JSON.parse(decodeURIComponent(escape(atob(m[1].replace(/-/g, "+").replace(/_/g, "/"))))); } catch {}
+    history.replaceState(null, "", location.pathname + location.search);
+    if (hub && hub.token) { try { localStorage.setItem(HUB_KEY, JSON.stringify(hub)); } catch {} }
+  }
+  if (!hub) { try { hub = JSON.parse(localStorage.getItem(HUB_KEY)); } catch {} }
+  if (!hub || !hub.token || !hub.owner || !hub.repo) return false;
+  if (loadSettings().ghToken && !m) return false;
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...loadSettings(), ghToken: hub.token, ghRepo: `${hub.owner}/${hub.repo}` }));
+  return true;
+}
+
 function ghSettings() {
   const s = loadSettings();
   return { token: s.ghToken || "", repo: (s.ghRepo || GH_DEFAULT_REPO).trim() };
 }
 const ghConfigured = () => !!ghSettings().token;
 
-function ghApi(path, options = {}) {
+// 401/403 のときは接続コードで取り直し、トークンが変わっていれば同じリクエストを1回だけやり直す。
+// 同時に失敗した複数の同期は1回の取り直しを共有し、変化が無かった場合は1分間は取り直さない
+let ghRecovery = null, ghRecoveryFailedAt = 0;
+async function ghApi(path, options = {}) {
+  const used = ghSettings().token;
+  let res = await ghFetch(path, options);
+  if ((res.status === 401 || res.status === 403) && Date.now() - ghRecoveryFailedAt > 60000) {
+    if (!ghRecovery) ghRecovery = recoverByCode().then(ok => { if (!ok) ghRecoveryFailedAt = Date.now(); return ok; }).finally(() => { ghRecovery = null; });
+    await ghRecovery;
+    if (ghSettings().token && ghSettings().token !== used) res = await ghFetch(path, options);
+  }
+  return res;
+}
+function ghFetch(path, options = {}) {
   const { token, repo } = ghSettings();
   return fetch(`https://api.github.com/repos/${repo}${path}`, {
     method: options.method || "GET",
@@ -1900,6 +1980,16 @@ async function processGhSync(showErrors = false) {
 // （失敗しても未同期件数に残るので、後から「今すぐ同期」やオンライン復帰時に追いつける）
 function requestGhSync() {
   processGhSync().catch(() => {});
+}
+
+// 接続コード等で設定が変わったとき、設定画面のトークン表示とリポジトリ欄を更新する
+function refreshGhSettingsView() {
+  const s = loadSettings();
+  if ($("s-ghtoken") && s.ghToken) {
+    $("s-ghtoken").value = "";
+    $("s-ghtoken").placeholder = `設定済み（末尾: ...${s.ghToken.slice(-4)}）変更する場合のみ入力`;
+  }
+  if ($("s-ghrepo")) $("s-ghrepo").value = s.ghRepo ?? "";
 }
 
 function updateGhSyncStatus(tempText) {
@@ -3982,6 +4072,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("s-ghtoken").placeholder = `設定済み（末尾: ...${settings.ghToken.slice(-4)}）変更する場合のみ入力`;
   }
   $("s-ghrepo").value = settings.ghRepo ?? "";
+  // トークン未設定なら、Shiden Vault の共有キー（同じブラウザ）か保存済みの合言葉で自動接続する
+  if (!settings.ghToken) {
+    (async () => {
+      if (adoptHubConnection() || await recoverByCode()) { refreshGhSettingsView(); updateGhSyncStatus(); requestGhSync(); }
+    })();
+  }
   $("s-claimant-name").value = settings.claimantName ?? "";
   $("s-claimant-dept").value = settings.claimantDept ?? "";
   $("s-org-name").value = settings.orgName ?? "";
@@ -5208,6 +5304,29 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateGhSyncStatus();
     // トークンを新しく設定した時は、既存の明細をまとめて初回同期する
     if (ghToken && !hadGhToken) requestGhSync();
+  });
+
+  // GitHub同期: 接続コード（Shiden Vault の合言葉）で接続
+  $("gh-code-btn").addEventListener("click", async () => {
+    const code = $("s-ghcode").value;
+    if (!normCode(code)) return;
+    const btn = $("gh-code-btn"), hadGhToken = ghConfigured();
+    btn.disabled = true;
+    updateGhSyncStatus("接続コードを確認中…");
+    try {
+      await applyConnectCode(code);
+      $("s-ghcode").value = "";
+      refreshGhSettingsView();
+      updateGhSyncStatus();
+      alert("接続しました。");
+      // 初めて設定した時は既存の明細をまとめて同期する（トークン手入力時と同じ）
+      if (!hadGhToken) requestGhSync();
+    } catch (err) {
+      updateGhSyncStatus();
+      alert(err.message);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // GitHub同期: 手動同期（自動同期が失敗していた分の追いつき用）
